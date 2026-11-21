@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   nasdrop-server:
     image: ghcr.io/anansite/nasdrop-server:latest
@@ -9,7 +7,7 @@ services:
       - "8881:8881"
     volumes:
       - /mnt/merged/nas:/data
-      - /mnt/sata1-4/Configs/nasdrop:/config
+      - ./data:/config
     environment:
       - PORT=8881
       - DATA_DIR=/data
