@@ -10,18 +10,42 @@
 
 ---
 
-## 快速开始
+## 快速开始与部署
 
-### 方式一：Docker Compose 运行（推荐）
+> **重要原则**：**严禁在路由器等边缘小主机设备上执行 `docker build` 或源码编译**。
+> 本仓库已接入 GitHub Actions 自动化 CI，每次提交均会自动多架构交叉编译（linux/amd64, linux/arm64）并发布最新 Docker 镜像与独立运行二进制。路由器仅拉取预构建镜像或下载 Release 单文件运行，零性能损耗。
+
+### 方式一：Docker / Docker Compose（推荐）
+
+直接拉取 GitHub 官方预构建镜像运行：
 
 ```bash
+docker run -d \
+  --name nasdrop-server \
+  --restart unless-stopped \
+  -p 8881:8881 \
+  -v /mnt/merged/nas:/data \
+  -v /mnt/sata1-4/Configs/nasdrop:/config \
+  -e PORT=8881 \
+  -e DATA_DIR=/data \
+  -e DB_PATH=/config/nasdrop.db \
+  -e THUMB_DIR=/config/thumbnails \
+  ghcr.io/anansite/nasdrop-server:latest
+```
+
+或使用 `docker-compose.yml`：
+
+```bash
+docker compose pull
 docker compose up -d
 ```
 
-### 方式二：直接运行二进制程序
+### 方式二：直接运行预编译独立二进制程序
+
+从 GitHub Releases / Actions Artifacts 直接下载对应架构的二进制文件（如 `nasdrop-server-linux-amd64`）：
 
 ```bash
-./nasdrop-server -port 8881 -data /mnt/storage -db /mnt/storage/nasdrop.db
+./nasdrop-server -port 8881 -data /mnt/merged/nas -db /mnt/sata1-4/Configs/nasdrop/nasdrop.db
 ```
 
 ### 运行参数与环境变量
