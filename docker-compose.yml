@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  nasdrop-server:
+    image: ghcr.io/anansite/nasdrop-server:latest
+    build: .
+    container_name: nasdrop-server
+    restart: unless-stopped
+    ports:
+      # 映射端口为 8090（非 8888）
+      - "8090:8090"
+    volumes:
+      # 将宿主机存储目录挂载至容器内部 /data
+      - /mnt/storage:/data
+    environment:
+      - PORT=8090
+      - DATA_DIR=/data
+      - DB_PATH=/data/nasdrop.db
+      # - NASDROP_USER=admin
+      # - NASDROP_PASS=yourpassword
