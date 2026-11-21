@@ -7,7 +7,7 @@ RUN go mod download || true
 
 COPY . .
 
-# 纯 Go 编译，完全不需要 CGO，跨平台编译极度稳定
+RUN go mod tidy
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o nasdrop-server ./cmd/server
 
 FROM alpine:latest
