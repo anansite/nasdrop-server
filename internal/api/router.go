@@ -7,14 +7,17 @@ import (
 	"strings"
 
 	"github.com/anansite/nasdrop-server/internal/db"
+	"github.com/anansite/nasdrop-server/internal/thumb"
 )
 
 type Router struct {
-	store *db.Store
+	store    *db.Store
+	dataDir  string
+	thumbDir string
 }
 
-func NewRouter(store *db.Store) *Router {
-	return &Router{store: store}
+func NewRouter(store *db.Store, dataDir, thumbDir string) *Router {
+	return &Router{store: store, dataDir: dataDir, thumbDir: thumbDir}
 }
 
 func (rt *Router) Register(mux *http.ServeMux) {
@@ -22,6 +25,27 @@ func (rt *Router) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/metadata", rt.handleMetadata)
 	mux.HandleFunc("/api/timeline", rt.handleTimeline)
 	mux.HandleFunc("/api/reconcile", rt.handleReconcile)
+	mux.HandleFunc("/api/thumbnail", rt.handleThumbnail)
+}
+
+func (rt *Router) handleThumbnail(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "Missing path query parameter", http.StatusBadRequest)
+		return
+	}
+	dim := 320
+	if dStr := r.URL.Query().Get("dim"); dStr != "" {
+		if d, err := strconv.Atoi(dStr); err == nil && d > 0 && d <= 1024 {
+			dim = d
+		}
+	}
+	thumbFile, err := thumb.GetOrGenerate(rt.dataDir, rt.thumbDir, path, dim)
+	if err != nil {
+		http.Error(w, "Thumbnail not available: "+err.Error(), http.StatusNotFound)
+		return
+	}
+	thumb.ServeThumbnail(w, r, thumbFile)
 }
 
 func (rt *Router) handlePing(w http.ResponseWriter, r *http.Request) {

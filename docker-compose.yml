@@ -2,19 +2,21 @@ version: '3.8'
 
 services:
   nasdrop-server:
-    image: ghcr.io/anansite/nasdrop-server:latest
+    image: nasdrop-server:latest
     build: .
     container_name: nasdrop-server
-    restart: unless-stopped
+    restart: always
     ports:
-      # 映射端口为 8881
       - "8881:8881"
     volumes:
-      # 将宿主机存储目录挂载至容器内部 /data
-      - /mnt/storage:/data
+      - /mnt/merged/nas:/data
+      - /mnt/sata1-4/Configs/nasdrop:/config
     environment:
       - PORT=8881
       - DATA_DIR=/data
-      - DB_PATH=/data/nasdrop.db
-      # - NASDROP_USER=admin
-      # - NASDROP_PASS=yourpassword
+      - DB_PATH=/config/nasdrop.db
+      - THUMB_DIR=/config/thumbnails
+    deploy:
+      resources:
+        limits:
+          memory: 512M

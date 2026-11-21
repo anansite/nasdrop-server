@@ -30,7 +30,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	// 1. 注册商业级相册 REST API (/api/...)
-	apiRouter := api.NewRouter(store)
+	apiRouter := api.NewRouter(store, cfg.DataDir, cfg.ThumbDir)
 	apiRouter.Register(mux)
 
 	// 2. 注册标准 RFC 4918 WebDAV 处理器（挂载在 / 与 /dav）

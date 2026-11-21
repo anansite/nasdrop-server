@@ -10,6 +10,7 @@ type Config struct {
 	Port     int
 	DataDir  string
 	DBPath   string
+	ThumbDir string
 	Username string
 	Password string
 }
@@ -19,6 +20,7 @@ func Load() *Config {
 		Port:     8881, // 默认使用 8881 端口
 		DataDir:  "./data",
 		DBPath:   "./nasdrop.db",
+		ThumbDir: "./thumbnails",
 		Username: "",
 		Password: "",
 	}
@@ -34,6 +36,11 @@ func Load() *Config {
 	if envDB := os.Getenv("DB_PATH"); envDB != "" {
 		cfg.DBPath = envDB
 	}
+	if envThumb := os.Getenv("THUMB_DIR"); envThumb != "" {
+		cfg.ThumbDir = envThumb
+	} else if cfg.DBPath != "" {
+		cfg.ThumbDir = cfg.DBPath + "_thumbs"
+	}
 	if envUser := os.Getenv("NASDROP_USER"); envUser != "" {
 		cfg.Username = envUser
 	}
@@ -44,6 +51,7 @@ func Load() *Config {
 	flag.IntVar(&cfg.Port, "port", cfg.Port, "HTTP/WebDAV service port")
 	flag.StringVar(&cfg.DataDir, "data", cfg.DataDir, "Root storage directory for WebDAV")
 	flag.StringVar(&cfg.DBPath, "db", cfg.DBPath, "SQLite database file path")
+	flag.StringVar(&cfg.ThumbDir, "thumb", cfg.ThumbDir, "Thumbnails cache directory")
 	flag.StringVar(&cfg.Username, "user", cfg.Username, "WebDAV / API authentication username (optional)")
 	flag.StringVar(&cfg.Password, "pass", cfg.Password, "WebDAV / API authentication password (optional)")
 	flag.Parse()
