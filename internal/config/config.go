@@ -16,7 +16,7 @@ type Config struct {
 
 func Load() *Config {
 	cfg := &Config{
-		Port:     8090, // 默认使用 8090，避开 8888 端口
+		Port:     8881, // 默认使用 8881 端口
 		DataDir:  "./data",
 		DBPath:   "./nasdrop.db",
 		Username: "",

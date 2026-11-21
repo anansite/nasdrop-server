@@ -17,10 +17,10 @@ WORKDIR /app
 
 COPY --from=builder /app/nasdrop-server .
 
-EXPOSE 8090
+EXPOSE 8881
 VOLUME ["/data"]
 
-ENV PORT=8090
+ENV PORT=8881
 ENV DATA_DIR=/data
 ENV DB_PATH=/data/nasdrop.db
 

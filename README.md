@@ -21,14 +21,14 @@ docker compose up -d
 ### 方式二：直接运行二进制程序
 
 ```bash
-./nasdrop-server -port 8090 -data /mnt/storage -db /mnt/storage/nasdrop.db
+./nasdrop-server -port 8881 -data /mnt/storage -db /mnt/storage/nasdrop.db
 ```
 
 ### 运行参数与环境变量
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `-port` | `PORT` | `8090` | HTTP 与 WebDAV 服务监听端口 |
+| `-port` | `PORT` | `8881` | HTTP 与 WebDAV 服务监听端口 |
 | `-data` | `DATA_DIR` | `./data` | WebDAV 挂载的本地硬盘存储目录 |
 | `-db` | `DB_PATH` | `./nasdrop.db` | SQLite 数据库文件存储路径 |
 | `-user` | `NASDROP_USER` | 空 | WebDAV 与 API 基础鉴权账号（可选） |
@@ -38,7 +38,7 @@ docker compose up -d
 
 ## 核心接口说明
 
-- **标准 WebDAV**：`http://ip:8090/` 或 `http://ip:8090/dav`
+- **标准 WebDAV**：`http://ip:8881/` 或 `http://ip:8881/dav`
 - **相册时间轴**：`GET /api/timeline?limit=100&offset=0`（按拍摄时间降序）
 - **元数据同步**：`POST /api/metadata`（手机端上报拍摄时间与缩略图映射）
 - **差量对齐**：`POST /api/reconcile`（清理外部删除的孤儿记录）
