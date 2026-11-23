@@ -13,17 +13,19 @@ import (
 )
 
 type Router struct {
-	store    *db.Store
-	dataDir  string
-	thumbDir string
+	store     *db.Store
+	dataDir   string
+	thumbDir  string
+	startTime time.Time
 }
 
 func NewRouter(store *db.Store, dataDir, thumbDir string) *Router {
-	return &Router{store: store, dataDir: dataDir, thumbDir: thumbDir}
+	return &Router{store: store, dataDir: dataDir, thumbDir: thumbDir, startTime: time.Now()}
 }
 
 func (rt *Router) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ping", rt.handlePing)
+	mux.HandleFunc("/api/system", rt.handleSystem)
 	mux.HandleFunc("/api/metadata", rt.handleMetadata)
 	mux.HandleFunc("/api/timeline", rt.handleTimeline)
 	mux.HandleFunc("/api/memories", rt.handleMemories)
