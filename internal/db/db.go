@@ -268,6 +268,39 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	return list, nil
 }
 
+// GetMemories 查询历史年份在今日（或指定月日）拍摄的照片与视频列表
+func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]PhotoMetadata, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+		SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, updated_at
+		FROM photo_metadata
+		WHERE taken_at > 0
+		  AND strftime('%m-%d', datetime(taken_at / 1000, 'unixepoch', 'localtime')) = ?
+		  AND strftime('%Y', datetime(taken_at / 1000, 'unixepoch', 'localtime')) < ?
+		ORDER BY taken_at DESC
+		LIMIT ?;
+	`
+	rows, err := s.db.Query(query, monthDay, currentYear, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []PhotoMetadata
+	for rows.Next() {
+		var m PhotoMetadata
+		var hasThumbInt int
+		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.UpdatedAt); err != nil {
+			continue
+		}
+		m.HasThumb = hasThumbInt == 1
+		list = append(list, m)
+	}
+	return list, nil
+}
+
 func (s *Store) Reconcile(dir string, livePaths []string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

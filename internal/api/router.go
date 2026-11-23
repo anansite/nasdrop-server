@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anansite/nasdrop-server/internal/db"
 	"github.com/anansite/nasdrop-server/internal/thumb"
@@ -25,6 +26,7 @@ func (rt *Router) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ping", rt.handlePing)
 	mux.HandleFunc("/api/metadata", rt.handleMetadata)
 	mux.HandleFunc("/api/timeline", rt.handleTimeline)
+	mux.HandleFunc("/api/memories", rt.handleMemories)
 	mux.HandleFunc("/api/reconcile", rt.handleReconcile)
 	mux.HandleFunc("/api/thumbnail", rt.handleThumbnail)
 }
@@ -138,6 +140,43 @@ func (rt *Router) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"count":  len(list),
 		"items":  list,
+	})
+}
+
+// 获取“那年今天”历史同一天的照片与视频列表
+func (rt *Router) handleMemories(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	now := time.Now()
+	monthDay := now.Format("01-02")
+	currentYear := now.Format("2006")
+
+	if d := r.URL.Query().Get("date"); d != "" && len(d) == 5 && strings.Contains(d, "-") {
+		monthDay = d
+	}
+
+	limit := 300
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 1000 {
+			limit = l
+		}
+	}
+
+	items, err := rt.store.GetMemories(monthDay, currentYear, limit)
+	if err != nil {
+		http.Error(w, "Query memories failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
+		"date":   monthDay,
+		"count":  len(items),
+		"items":  items,
 	})
 }
 
