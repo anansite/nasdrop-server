@@ -21,9 +21,13 @@ COPY --from=builder /app/nasdrop-server .
 EXPOSE 8881
 VOLUME ["/data", "/config"]
 
+ENV TZ=Asia/Shanghai
 ENV PORT=8881
 ENV DATA_DIR=/data
 ENV DB_PATH=/config/nasdrop.db
 ENV THUMB_DIR=/config/thumbnails
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8881/api/ping || exit 1
 
 ENTRYPOINT ["./nasdrop-server"]

@@ -22,9 +22,11 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite db failed: %w", err)
 	}
 
-	// 启用 WAL 模式提高读写并发性能
+	// 启用 WAL 模式提高读写并发性能与死锁超时保护
 	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
 	_, _ = db.Exec("PRAGMA synchronous=NORMAL;")
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+	_, _ = db.Exec("PRAGMA cache_size=-2000;")
 
 	schema := `
 	CREATE TABLE IF NOT EXISTS photo_metadata (
@@ -41,6 +43,7 @@ func Open(dbPath string) (*Store, error) {
 	);
 	CREATE INDEX IF NOT EXISTS idx_photo_dir ON photo_metadata(dir);
 	CREATE INDEX IF NOT EXISTS idx_photo_taken ON photo_metadata(taken_at);
+	CREATE INDEX IF NOT EXISTS idx_photo_dir_taken ON photo_metadata(dir, taken_at DESC);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema failed: %w", err)
@@ -54,8 +57,21 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Upsert(meta *PhotoMetadata) error {
+	return s.UpsertBatch([]PhotoMetadata{*meta})
+}
+
+func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
+	if len(metas) == 0 {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
 	query := `
 	INSERT INTO photo_metadata (path, name, dir, size, modified, taken_at, width, height, has_thumb, updated_at)
@@ -71,28 +87,39 @@ func (s *Store) Upsert(meta *PhotoMetadata) error {
 		has_thumb=excluded.has_thumb,
 		updated_at=excluded.updated_at;
 	`
-	hasThumbInt := 0
-	if meta.HasThumb {
-		hasThumbInt = 1
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		return err
 	}
-	updatedAt := meta.UpdatedAt
-	if updatedAt == 0 {
-		updatedAt = time.Now().UnixMilli()
-	}
+	defer stmt.Close()
 
-	_, err := s.db.Exec(query,
-		strings.Trim(meta.Path, "/"),
-		meta.Name,
-		strings.Trim(meta.Dir, "/"),
-		meta.Size,
-		meta.Modified,
-		meta.TakenAt,
-		meta.Width,
-		meta.Height,
-		hasThumbInt,
-		updatedAt,
-	)
-	return err
+	now := time.Now().UnixMilli()
+	for i := range metas {
+		m := &metas[i]
+		hasThumbInt := 0
+		if m.HasThumb {
+			hasThumbInt = 1
+		}
+		updatedAt := m.UpdatedAt
+		if updatedAt == 0 {
+			updatedAt = now
+		}
+		if _, err := stmt.Exec(
+			strings.Trim(m.Path, "/"),
+			m.Name,
+			strings.Trim(m.Dir, "/"),
+			m.Size,
+			m.Modified,
+			m.TakenAt,
+			m.Width,
+			m.Height,
+			hasThumbInt,
+			updatedAt,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Delete(path string) error {
@@ -267,8 +294,19 @@ func (s *Store) Reconcile(dir string, livePaths []string) ([]string, error) {
 		}
 	}
 
-	for _, p := range toDelete {
-		_, _ = s.db.Exec("DELETE FROM photo_metadata WHERE path = ?", p)
+	if len(toDelete) > 0 {
+		tx, err := s.db.Begin()
+		if err == nil {
+			defer tx.Rollback()
+			stmt, err := tx.Prepare("DELETE FROM photo_metadata WHERE path = ?")
+			if err == nil {
+				defer stmt.Close()
+				for _, p := range toDelete {
+					_, _ = stmt.Exec(p)
+				}
+				_ = tx.Commit()
+			}
+		}
 	}
 	return toDelete, nil
 }

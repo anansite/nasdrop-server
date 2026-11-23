@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/anansite/nasdrop-server/internal/api"
 	"github.com/anansite/nasdrop-server/internal/config"
@@ -33,8 +37,8 @@ func main() {
 	apiRouter := api.NewRouter(store, cfg.DataDir, cfg.ThumbDir)
 	apiRouter.Register(mux)
 
-	// 2. 注册标准 RFC 4918 WebDAV 处理器（挂载在 / 与 /dav）
-	davHandler := webdav.NewHookedHandler("", cfg.DataDir, store)
+	// 2. 注册标准 RFC 4918 WebDAV 处理器（挂载在 / 与 /dav，联动缩略图缓存清理）
+	davHandler := webdav.NewHookedHandler("", cfg.DataDir, cfg.ThumbDir, store)
 	mux.Handle("/", davHandler)
 
 	// 3. 全局鉴权与 CORS 中间件包装
@@ -65,15 +69,39 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("==================================================")
-	log.Printf("★ NasDrop Server 已启动")
-	log.Printf("  - 服务监听端口: %d (非 8888)", cfg.Port)
+	log.Printf("★ NasDrop Server 已启动 (生产加固版)")
+	log.Printf("  - 服务监听端口: %d", cfg.Port)
 	log.Printf("  - WebDAV 存储路径: %s", cfg.DataDir)
 	log.Printf("  - 数据库文件: %s", cfg.DBPath)
 	log.Printf("  - 标准 WebDAV 地址: http://127.0.0.1:%d/", cfg.Port)
 	log.Printf("  - 商业级相册 API: http://127.0.0.1:%d/api/timeline", cfg.Port)
 	log.Printf("==================================================")
 
-	if err := http.ListenAndServe(addr, rootHandler); err != nil {
-		log.Fatalf("Server exited with error: %v", err)
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           rootHandler,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server exited with error: %v", err)
+		}
+	}()
+
+	<-stopChan
+	log.Printf("收到停止信号，正在优雅关闭 NasDrop 服务...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("服务优雅关闭超时: %v", err)
+	} else {
+		log.Printf("NasDrop Server 已安全退出。")
 	}
 }

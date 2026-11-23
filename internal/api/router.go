@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -34,13 +35,18 @@ func (rt *Router) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing path query parameter", http.StatusBadRequest)
 		return
 	}
+	cleanPath := filepath.Clean(filepath.FromSlash(strings.Trim(path, "/")))
+	if cleanPath == "." || cleanPath == "" || strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		http.Error(w, "Invalid path: path traversal detected", http.StatusBadRequest)
+		return
+	}
 	dim := 320
 	if dStr := r.URL.Query().Get("dim"); dStr != "" {
 		if d, err := strconv.Atoi(dStr); err == nil && d > 0 && d <= 1024 {
 			dim = d
 		}
 	}
-	thumbFile, err := thumb.GetOrGenerate(rt.dataDir, rt.thumbDir, path, dim)
+	thumbFile, err := thumb.GetOrGenerate(rt.dataDir, rt.thumbDir, cleanPath, dim)
 	if err != nil {
 		http.Error(w, "Thumbnail not available: "+err.Error(), http.StatusNotFound)
 		return
@@ -87,11 +93,9 @@ func (rt *Router) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		metas = append(metas, single)
 	}
 
-	for i := range metas {
-		if err := rt.store.Upsert(&metas[i]); err != nil {
-			http.Error(w, "Failed to upsert: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := rt.store.UpsertBatch(metas); err != nil {
+		http.Error(w, "Failed to upsert batch: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")

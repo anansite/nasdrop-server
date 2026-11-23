@@ -14,7 +14,50 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// genLimit 控制原图解码与缩放的最大并发数，防止软路由/低配 NAS 内存溢出 (OOM)
+var genLimit = make(chan struct{}, 2)
+
+// 轻量级单飞调用管理器：对同一张图片的并发生成请求进行合并，避免重复解码消耗 CPU
+type call struct {
+	wg  sync.WaitGroup
+	val string
+	err error
+}
+
+type singleflightGroup struct {
+	mu sync.Mutex
+	m  map[string]*call
+}
+
+func (g *singleflightGroup) Do(key string, fn func() (string, error)) (string, error) {
+	g.mu.Lock()
+	if g.m == nil {
+		g.m = make(map[string]*call)
+	}
+	if c, ok := g.m[key]; ok {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err
+	}
+	c := new(call)
+	c.wg.Add(1)
+	g.m[key] = c
+	g.mu.Unlock()
+
+	c.val, c.err = fn()
+	c.wg.Done()
+
+	g.mu.Lock()
+	delete(g.m, key)
+	g.mu.Unlock()
+
+	return c.val, c.err
+}
+
+var flightGroup singleflightGroup
 
 // Resize 纯 Go 高性能等比下采样缩放
 func Resize(src image.Image, maxW, maxH int) image.Image {
@@ -56,21 +99,30 @@ func Resize(src image.Image, maxW, maxH int) image.Image {
 }
 
 // GetOrGenerate 获取或生成缩略图绝对路径
-// 优先命中同级伴生缩略图 (.thumbnails/) 与磁盘持久化缓存，零重复解码
+// 优先命中同级伴生缩略图 (.thumbnails/) 与磁盘持久化缓存，零重复解码；严格防御路径穿越
 func GetOrGenerate(dataDir, cacheDir, relPath string, maxDim int) (string, error) {
-	relPath = strings.Trim(relPath, "/")
-	if relPath == "" {
-		return "", fmt.Errorf("empty path")
+	cleanRel := filepath.Clean(filepath.FromSlash(strings.Trim(relPath, "/")))
+	if cleanRel == "." || cleanRel == "" || strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
+		return "", fmt.Errorf("invalid path: path traversal detected")
 	}
 
-	// 1. 优先检查同级伴生缩略图 .thumbnails/<filename>
-	parent := filepath.Dir(relPath)
-	filename := filepath.Base(relPath)
+	absData, err := filepath.Abs(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve data dir failed: %w", err)
+	}
+	fullPath := filepath.Join(absData, cleanRel)
+	if !strings.HasPrefix(fullPath, absData) {
+		return "", fmt.Errorf("access denied: path outside data directory")
+	}
+
+	// 1. 优先检查同级伴生缩略图 .thumbnails/<filename>（毫秒级秒开）
+	parent := filepath.Dir(cleanRel)
+	filename := filepath.Base(cleanRel)
 	var companionPath string
 	if parent == "." || parent == "" {
-		companionPath = filepath.Join(dataDir, ".thumbnails", filename)
+		companionPath = filepath.Join(absData, ".thumbnails", filename)
 	} else {
-		companionPath = filepath.Join(dataDir, parent, ".thumbnails", filename)
+		companionPath = filepath.Join(absData, parent, ".thumbnails", filename)
 	}
 	if info, err := os.Stat(companionPath); err == nil && !info.IsDir() && info.Size() > 0 {
 		return companionPath, nil
@@ -81,7 +133,7 @@ func GetOrGenerate(dataDir, cacheDir, relPath string, maxDim int) (string, error
 		return "", err
 	}
 	h := md5.New()
-	io.WriteString(h, relPath)
+	io.WriteString(h, cleanRel)
 	io.WriteString(h, fmt.Sprintf(":%d", maxDim))
 	hashKey := hex.EncodeToString(h.Sum(nil))
 	cachedFile := filepath.Join(cacheDir, hashKey+".jpg")
@@ -90,37 +142,59 @@ func GetOrGenerate(dataDir, cacheDir, relPath string, maxDim int) (string, error
 		return cachedFile, nil
 	}
 
-	// 3. 原图解码与轻量缩放
-	fullPath := filepath.Join(dataDir, relPath)
-	f, err := os.Open(fullPath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+	// 3. 经由 SingleFlight 和并发信号量进行原图解码与轻量缩放
+	return flightGroup.Do(hashKey, func() (string, error) {
+		// 双重检查：避免排队等待时前序协程已生成完毕
+		if info, err := os.Stat(cachedFile); err == nil && !info.IsDir() && info.Size() > 0 {
+			return cachedFile, nil
+		}
 
-	img, _, err := image.Decode(f)
-	if err != nil {
-		return "", fmt.Errorf("decode image failed: %w", err)
-	}
+		// 获取并发生成令牌，排队防止高并发解码引发 OOM
+		genLimit <- struct{}{}
+		defer func() { <-genLimit }()
 
-	thumb := Resize(img, maxDim, maxDim)
+		f, err := os.Open(fullPath)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
 
-	tmpFile := cachedFile + ".tmp"
-	out, err := os.Create(tmpFile)
-	if err != nil {
-		return "", err
-	}
-	if err := jpeg.Encode(out, thumb, &jpeg.Options{Quality: 75}); err != nil {
+		img, _, err := image.Decode(f)
+		if err != nil {
+			return "", fmt.Errorf("decode image failed: %w", err)
+		}
+
+		thumb := Resize(img, maxDim, maxDim)
+
+		tmpFile := cachedFile + ".tmp"
+		out, err := os.Create(tmpFile)
+		if err != nil {
+			return "", err
+		}
+		if err := jpeg.Encode(out, thumb, &jpeg.Options{Quality: 75}); err != nil {
+			out.Close()
+			os.Remove(tmpFile)
+			return "", err
+		}
 		out.Close()
-		os.Remove(tmpFile)
-		return "", err
-	}
-	out.Close()
 
-	if err := os.Rename(tmpFile, cachedFile); err != nil {
-		return tmpFile, nil
+		if err := os.Rename(tmpFile, cachedFile); err != nil {
+			return tmpFile, nil
+		}
+		return cachedFile, nil
+	})
+}
+
+// DeleteCache 清理某个相对路径对应的持久化缩略图缓存
+func DeleteCache(cacheDir, relPath string) {
+	cleanRel := filepath.Clean(filepath.FromSlash(strings.Trim(relPath, "/")))
+	for _, dim := range []int{320, 640, 1024} {
+		h := md5.New()
+		io.WriteString(h, cleanRel)
+		io.WriteString(h, fmt.Sprintf(":%d", dim))
+		hashKey := hex.EncodeToString(h.Sum(nil))
+		_ = os.Remove(filepath.Join(cacheDir, hashKey+".jpg"))
 	}
-	return cachedFile, nil
 }
 
 // ServeThumbnail 响应缩略图 HTTP 请求，带有完备的 HTTP 客户端强缓存头
