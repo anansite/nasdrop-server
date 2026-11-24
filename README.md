@@ -24,12 +24,14 @@ docker run -d \
   --name nasdrop-server \
   --restart unless-stopped \
   -p 8881:8881 \
-  -v /mnt/merged/nas:/data \
-  -v /mnt/sata1-4/Configs/nasdrop:/config \
+  -v /path/to/your/nas:/data \
+  -v /path/to/config:/config \
   -e PORT=8881 \
   -e DATA_DIR=/data \
   -e DB_PATH=/config/nasdrop.db \
   -e THUMB_DIR=/config/thumbnails \
+  -e NASDROP_USER=admin \
+  -e NASDROP_PASS=changeme123 \
   ghcr.io/anansite/nasdrop-server:latest
 ```
 
@@ -45,7 +47,7 @@ docker compose up -d
 从 GitHub Releases / Actions Artifacts 直接下载对应架构的二进制文件（如 `nasdrop-server-linux-amd64`）：
 
 ```bash
-./nasdrop-server -port 8881 -data /mnt/merged/nas -db /mnt/sata1-4/Configs/nasdrop/nasdrop.db
+./nasdrop-server -port 8881 -data /path/to/your/nas -db /path/to/config/nasdrop.db -user admin -pass changeme123
 ```
 
 ### 运行参数与环境变量

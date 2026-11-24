@@ -6,13 +6,16 @@ services:
     ports:
       - "8881:8881"
     volumes:
-      - /mnt/merged/nas:/data
-      - ./data:/config
+      - /path/to/your/nas:/data
+      - ./config:/config
     environment:
       - PORT=8881
       - DATA_DIR=/data
       - DB_PATH=/config/nasdrop.db
       - THUMB_DIR=/config/thumbnails
+      # 必填安全项：请配置您专属的 WebDAV 与 API 鉴权账号密码
+      - NASDROP_USER=admin
+      - NASDROP_PASS=changeme123
     deploy:
       resources:
         limits:

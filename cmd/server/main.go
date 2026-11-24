@@ -75,6 +75,11 @@ func main() {
 	log.Printf("  - 数据库文件: %s", cfg.DBPath)
 	log.Printf("  - 标准 WebDAV 地址: http://127.0.0.1:%d/", cfg.Port)
 	log.Printf("  - 商业级相册 API: http://127.0.0.1:%d/api/timeline", cfg.Port)
+	if cfg.Username == "" || cfg.Password == "" {
+		log.Printf("  ⚠️  [安全警告] 未配置 NASDROP_USER / NASDROP_PASS，WebDAV 与 API 处于免密状态！")
+	} else {
+		log.Printf("  🔒 [安全防护] 已启用 Basic Auth 鉴权防护 (用户: %s)", cfg.Username)
+	}
 	log.Printf("==================================================")
 
 	srv := &http.Server{
