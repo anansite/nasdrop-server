@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,18 +50,37 @@ func (rt *Router) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid path: path traversal detected", http.StatusBadRequest)
 		return
 	}
-	dim := 320
-	if dStr := r.URL.Query().Get("dim"); dStr != "" {
-		if d, err := strconv.Atoi(dStr); err == nil && d > 0 && d <= 1024 {
-			dim = d
-		}
-	}
-	thumbFile, err := thumb.GetOrGenerate(rt.dataDir, rt.thumbDir, cleanPath, dim)
+	absData, err := filepath.Abs(rt.dataDir)
 	if err != nil {
-		http.Error(w, "Thumbnail not available: "+err.Error(), http.StatusNotFound)
+		http.Error(w, "Server data dir error", http.StatusInternalServerError)
 		return
 	}
-	thumb.ServeThumbnail(w, r, thumbFile)
+
+	// 1. 优先读取 NAS 根目录公共缩略图库 .nasdrop_thumbs/<thumb_id>.jpg（彻底禁止服务端解码补齐）
+	if thumbID := rt.store.GetThumbID(filepath.ToSlash(cleanPath)); thumbID != "" {
+		safeID := filepath.Base(thumbID)
+		sharedThumb := filepath.Join(absData, ".nasdrop_thumbs", safeID+".jpg")
+		if info, err := os.Stat(sharedThumb); err == nil && !info.IsDir() && info.Size() > 0 {
+			thumb.ServeThumbnail(w, r, sharedThumb)
+			return
+		}
+	}
+
+	// 2. 兼容存量旧目录 .thumbnails/<filename>（仅直接读取磁盘文件，禁止服务端解码）
+	parent := filepath.Dir(cleanPath)
+	filename := filepath.Base(cleanPath)
+	var legacyThumb string
+	if parent == "." || parent == "" {
+		legacyThumb = filepath.Join(absData, ".thumbnails", filename)
+	} else {
+		legacyThumb = filepath.Join(absData, parent, ".thumbnails", filename)
+	}
+	if info, err := os.Stat(legacyThumb); err == nil && !info.IsDir() && info.Size() > 0 {
+		thumb.ServeThumbnail(w, r, legacyThumb)
+		return
+	}
+
+	http.Error(w, "Thumbnail not uploaded", http.StatusNotFound)
 }
 
 func (rt *Router) handlePing(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ type PhotoMetadata struct {
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
 	HasThumb  bool   `json:"has_thumb"`
+	ThumbID   string `json:"thumb_id"`
 	UpdatedAt int64  `json:"updated_at"`
 }
 

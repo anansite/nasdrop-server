@@ -40,6 +40,7 @@ func Open(dbPath string) (*Store, error) {
 		width INTEGER NOT NULL DEFAULT 0,
 		height INTEGER NOT NULL DEFAULT 0,
 		has_thumb INTEGER NOT NULL DEFAULT 0,
+		thumb_id TEXT NOT NULL DEFAULT '',
 		updated_at INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_photo_dir ON photo_metadata(dir);
@@ -69,6 +70,8 @@ func Open(dbPath string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema failed: %w", err)
 	}
+	// 兼容旧库平滑迁移新增 thumb_id 列
+	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN thumb_id TEXT NOT NULL DEFAULT ''")
 
 	return &Store{db: db}, nil
 }
@@ -95,8 +98,8 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 	defer tx.Rollback()
 
 	query := `
-	INSERT INTO photo_metadata (path, name, dir, size, modified, taken_at, width, height, has_thumb, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO photo_metadata (path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(path) DO UPDATE SET
 		name=excluded.name,
 		dir=excluded.dir,
@@ -105,7 +108,8 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 		taken_at=excluded.taken_at,
 		width=excluded.width,
 		height=excluded.height,
-		has_thumb=excluded.has_thumb,
+		has_thumb=CASE WHEN excluded.has_thumb = 1 OR excluded.thumb_id != '' THEN 1 ELSE photo_metadata.has_thumb END,
+		thumb_id=CASE WHEN excluded.thumb_id != '' THEN excluded.thumb_id ELSE photo_metadata.thumb_id END,
 		updated_at=excluded.updated_at;
 	`
 	stmt, err := tx.Prepare(query)
@@ -135,6 +139,7 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 			m.Width,
 			m.Height,
 			hasThumbInt,
+			strings.TrimSpace(m.ThumbID),
 			updatedAt,
 		); err != nil {
 			return err
@@ -260,14 +265,14 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	cleanDir := strings.Trim(dir, "/")
 	if cleanDir == "" {
 		rows, err = s.db.Query(`
-			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, updated_at
+			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at
 			FROM photo_metadata
 			ORDER BY taken_at DESC
 			LIMIT ? OFFSET ?
 		`, limit, offset)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, updated_at
+			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at
 			FROM photo_metadata
 			WHERE dir = ? OR dir LIKE ?
 			ORDER BY taken_at DESC
@@ -284,7 +289,7 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	for rows.Next() {
 		var m PhotoMetadata
 		var hasThumbInt int
-		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.ThumbID, &m.UpdatedAt); err != nil {
 			continue
 		}
 		m.HasThumb = hasThumbInt == 1
@@ -293,13 +298,21 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	return list, nil
 }
 
+func (s *Store) GetThumbID(path string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var id string
+	_ = s.db.QueryRow(`SELECT thumb_id FROM photo_metadata WHERE path = ?`, strings.Trim(path, "/")).Scan(&id)
+	return id
+}
+
 // GetMemories 查询历史年份在今日（或指定月日）拍摄的照片与视频列表
 func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]PhotoMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	query := `
-		SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, updated_at
+		SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at
 		FROM photo_metadata
 		WHERE taken_at > 0
 		  AND strftime('%m-%d', datetime(taken_at / 1000, 'unixepoch', 'localtime')) = ?
@@ -317,7 +330,7 @@ func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]P
 	for rows.Next() {
 		var m PhotoMetadata
 		var hasThumbInt int
-		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.ThumbID, &m.UpdatedAt); err != nil {
 			continue
 		}
 		m.HasThumb = hasThumbInt == 1
