@@ -17,3 +17,13 @@ type TimelineBucket struct {
 	DateKey string `json:"date_key"` // e.g. "2024-05-14"
 	Count   int    `json:"count"`
 }
+
+type PhotoGroup struct {
+	ID        string   `json:"id"`
+	AlbumDir  string   `json:"album_dir"`
+	Title     string   `json:"title"`
+	Memo      string   `json:"memo"`
+	Items     []string `json:"items"`
+	CreatedAt int64    `json:"created_at"`
+	UpdatedAt int64    `json:"updated_at"`
+}

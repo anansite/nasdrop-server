@@ -27,6 +27,7 @@ func Open(dbPath string) (*Store, error) {
 	_, _ = db.Exec("PRAGMA synchronous=NORMAL;")
 	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
 	_, _ = db.Exec("PRAGMA cache_size=-2000;")
+	_, _ = db.Exec("PRAGMA foreign_keys=ON;")
 
 	schema := `
 	CREATE TABLE IF NOT EXISTS photo_metadata (
@@ -44,6 +45,26 @@ func Open(dbPath string) (*Store, error) {
 	CREATE INDEX IF NOT EXISTS idx_photo_dir ON photo_metadata(dir);
 	CREATE INDEX IF NOT EXISTS idx_photo_taken ON photo_metadata(taken_at);
 	CREATE INDEX IF NOT EXISTS idx_photo_dir_taken ON photo_metadata(dir, taken_at DESC);
+
+	CREATE TABLE IF NOT EXISTS photo_groups (
+		id TEXT PRIMARY KEY,
+		album_dir TEXT NOT NULL DEFAULT '',
+		title TEXT NOT NULL,
+		memo TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_photo_groups_album ON photo_groups(album_dir);
+
+	CREATE TABLE IF NOT EXISTS photo_group_items (
+		group_id TEXT NOT NULL,
+		photo_path TEXT NOT NULL,
+		sort_order INTEGER NOT NULL DEFAULT 0,
+		added_at INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (group_id, photo_path),
+		FOREIGN KEY (group_id) REFERENCES photo_groups(id) ON DELETE CASCADE
+	);
+	CREATE INDEX IF NOT EXISTS idx_group_items_path ON photo_group_items(photo_path);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema failed: %w", err)
@@ -127,6 +148,7 @@ func (s *Store) Delete(path string) error {
 	defer s.mu.Unlock()
 
 	clean := strings.Trim(path, "/")
+	_, _ = s.db.Exec("DELETE FROM photo_group_items WHERE photo_path = ?", clean)
 	_, err := s.db.Exec("DELETE FROM photo_metadata WHERE path = ?", clean)
 	return err
 }
@@ -137,9 +159,11 @@ func (s *Store) DeleteDir(dirPrefix string) error {
 
 	clean := strings.Trim(dirPrefix, "/")
 	if clean == "" {
+		_, _ = s.db.Exec("DELETE FROM photo_group_items")
 		_, err := s.db.Exec("DELETE FROM photo_metadata")
 		return err
 	}
+	_, _ = s.db.Exec("DELETE FROM photo_group_items WHERE photo_path = ? OR photo_path LIKE ?", clean, clean+"/%")
 	_, err := s.db.Exec("DELETE FROM photo_metadata WHERE path = ? OR path LIKE ?", clean, clean+"/%")
 	return err
 }
@@ -158,6 +182,7 @@ func (s *Store) Move(oldPath, newPath string) error {
 		newName = newClean[idx+1:]
 	}
 
+	_, _ = s.db.Exec("UPDATE photo_group_items SET photo_path = ? WHERE photo_path = ?", newClean, oldClean)
 	query := `
 	UPDATE photo_metadata 
 	SET path = ?, name = ?, dir = ?, updated_at = ?
@@ -342,4 +367,247 @@ func (s *Store) Reconcile(dir string, livePaths []string) ([]string, error) {
 		}
 	}
 	return toDelete, nil
+}
+
+// ==================== 相册串联组 (Photo Groups) CRUD ====================
+
+func (s *Store) ListGroups(albumDir string) ([]PhotoGroup, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.listGroupsLocked(albumDir)
+}
+
+func (s *Store) listGroupsLocked(albumDir string) ([]PhotoGroup, error) {
+	cleanAlbum := strings.Trim(albumDir, "/")
+	var rows *sql.Rows
+	var err error
+	if cleanAlbum == "" {
+		rows, err = s.db.Query(`SELECT id, album_dir, title, memo, created_at, updated_at FROM photo_groups ORDER BY updated_at DESC`)
+	} else {
+		rows, err = s.db.Query(`SELECT id, album_dir, title, memo, created_at, updated_at FROM photo_groups WHERE album_dir = ? ORDER BY updated_at DESC`, cleanAlbum)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	groups := make([]PhotoGroup, 0)
+	idxByID := make(map[string]int)
+	for rows.Next() {
+		var g PhotoGroup
+		if err := rows.Scan(&g.ID, &g.AlbumDir, &g.Title, &g.Memo, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			continue
+		}
+		g.Items = []string{}
+		idxByID[g.ID] = len(groups)
+		groups = append(groups, g)
+	}
+
+	if len(groups) == 0 {
+		return groups, nil
+	}
+
+	itemRows, err := s.db.Query(`SELECT group_id, photo_path FROM photo_group_items ORDER BY sort_order ASC, added_at ASC`)
+	if err != nil {
+		return groups, nil
+	}
+	defer itemRows.Close()
+
+	for itemRows.Next() {
+		var gid, p string
+		if err := itemRows.Scan(&gid, &p); err != nil {
+			continue
+		}
+		if i, ok := idxByID[gid]; ok {
+			groups[i].Items = append(groups[i].Items, p)
+		}
+	}
+	return groups, nil
+}
+
+func (s *Store) getGroupByIDLocked(id string) (*PhotoGroup, error) {
+	var g PhotoGroup
+	err := s.db.QueryRow(`SELECT id, album_dir, title, memo, created_at, updated_at FROM photo_groups WHERE id = ?`, id).
+		Scan(&g.ID, &g.AlbumDir, &g.Title, &g.Memo, &g.CreatedAt, &g.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	g.Items = []string{}
+	rows, err := s.db.Query(`SELECT photo_path FROM photo_group_items WHERE group_id = ? ORDER BY sort_order ASC, added_at ASC`, id)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err == nil {
+				g.Items = append(g.Items, p)
+			}
+		}
+	}
+	return &g, nil
+}
+
+func (s *Store) CreateGroup(g *PhotoGroup) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UnixMilli()
+	if g.ID == "" {
+		g.ID = fmt.Sprintf("grp_%d", now)
+	}
+	if g.CreatedAt == 0 {
+		g.CreatedAt = now
+	}
+	g.UpdatedAt = now
+	g.AlbumDir = strings.Trim(g.AlbumDir, "/")
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`INSERT INTO photo_groups (id, album_dir, title, memo, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		g.ID, g.AlbumDir, g.Title, g.Memo, g.CreatedAt, g.UpdatedAt,
+	); err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO photo_group_items (group_id, photo_path, sort_order, added_at) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	cleanItems := make([]string, 0, len(g.Items))
+	for i, rawPath := range g.Items {
+		p := strings.Trim(rawPath, "/")
+		if p == "" {
+			continue
+		}
+		cleanItems = append(cleanItems, p)
+		_, _ = stmt.Exec(g.ID, p, i, now)
+	}
+	g.Items = cleanItems
+
+	return tx.Commit()
+}
+
+func (s *Store) UpdateGroup(id string, title *string, memo *string, items []string, replaceItems bool) (*PhotoGroup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cur, err := s.getGroupByIDLocked(id)
+	if err != nil {
+		return nil, err
+	}
+
+	newTitle := cur.Title
+	if title != nil {
+		newTitle = *title
+	}
+	newMemo := cur.Memo
+	if memo != nil {
+		newMemo = *memo
+	}
+	now := time.Now().UnixMilli()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`UPDATE photo_groups SET title = ?, memo = ?, updated_at = ? WHERE id = ?`, newTitle, newMemo, now, id); err != nil {
+		return nil, err
+	}
+
+	if replaceItems {
+		if _, err := tx.Exec(`DELETE FROM photo_group_items WHERE group_id = ?`, id); err != nil {
+			return nil, err
+		}
+		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO photo_group_items (group_id, photo_path, sort_order, added_at) VALUES (?, ?, ?, ?)`)
+		if err != nil {
+			return nil, err
+		}
+		defer stmt.Close()
+		for i, rawPath := range items {
+			p := strings.Trim(rawPath, "/")
+			if p == "" {
+				continue
+			}
+			_, _ = stmt.Exec(id, p, i, now)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.getGroupByIDLocked(id)
+}
+
+func (s *Store) AppendGroupItems(groupID string, items []string) (*PhotoGroup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.getGroupByIDLocked(groupID); err != nil {
+		return nil, err
+	}
+
+	var maxOrder int
+	_ = s.db.QueryRow(`SELECT COALESCE(MAX(sort_order), -1) FROM photo_group_items WHERE group_id = ?`, groupID).Scan(&maxOrder)
+
+	now := time.Now().UnixMilli()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO photo_group_items (group_id, photo_path, sort_order, added_at) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	order := maxOrder + 1
+	for _, rawPath := range items {
+		p := strings.Trim(rawPath, "/")
+		if p == "" {
+			continue
+		}
+		if res, err := stmt.Exec(groupID, p, order, now); err == nil {
+			if aff, _ := res.RowsAffected(); aff > 0 {
+				order++
+			}
+		}
+	}
+	_, _ = tx.Exec(`UPDATE photo_groups SET updated_at = ? WHERE id = ?`, now, groupID)
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.getGroupByIDLocked(groupID)
+}
+
+func (s *Store) RemoveGroupItem(groupID, photoPath string) (*PhotoGroup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clean := strings.Trim(photoPath, "/")
+	now := time.Now().UnixMilli()
+	if _, err := s.db.Exec(`DELETE FROM photo_group_items WHERE group_id = ? AND photo_path = ?`, groupID, clean); err != nil {
+		return nil, err
+	}
+	_, _ = s.db.Exec(`UPDATE photo_groups SET updated_at = ? WHERE id = ?`, now, groupID)
+	return s.getGroupByIDLocked(groupID)
+}
+
+func (s *Store) DeleteGroup(groupID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`DELETE FROM photo_groups WHERE id = ?`, groupID)
+	return err
 }

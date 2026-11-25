@@ -31,6 +31,11 @@ func (rt *Router) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/memories", rt.handleMemories)
 	mux.HandleFunc("/api/reconcile", rt.handleReconcile)
 	mux.HandleFunc("/api/thumbnail", rt.handleThumbnail)
+	mux.HandleFunc("/api/groups", rt.handleGroups)
+	mux.HandleFunc("/api/groups/update", rt.handleGroupsUpdate)
+	mux.HandleFunc("/api/groups/append", rt.handleGroupsAppend)
+	mux.HandleFunc("/api/groups/remove-item", rt.handleGroupsRemoveItem)
+	mux.HandleFunc("/api/groups/delete", rt.handleGroupsDelete)
 }
 
 func (rt *Router) handleThumbnail(w http.ResponseWriter, r *http.Request) {
@@ -208,5 +213,147 @@ func (rt *Router) handleReconcile(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": "ok",
 		"purged": purged,
+	})
+}
+
+func (rt *Router) handleGroups(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		album := r.URL.Query().Get("album")
+		groups, err := rt.store.ListGroups(album)
+		if err != nil {
+			http.Error(w, "List groups failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"groups": groups,
+		})
+	case http.MethodPost:
+		var req db.PhotoGroup
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Title) == "" {
+			req.Title = "照片串联组"
+		}
+		if err := rt.store.CreateGroup(&req); err != nil {
+			http.Error(w, "Create group failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"group":  req,
+		})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (rt *Router) handleGroupsUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID           string   `json:"id"`
+		Title        *string  `json:"title"`
+		Memo         *string  `json:"memo"`
+		Items        []string `json:"items"`
+		ReplaceItems bool     `json:"replace_items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	updated, err := rt.store.UpdateGroup(req.ID, req.Title, req.Memo, req.Items, req.ReplaceItems)
+	if err != nil {
+		http.Error(w, "Update group failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
+		"group":  updated,
+	})
+}
+
+func (rt *Router) handleGroupsAppend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		GroupID string   `json:"group_id"`
+		Items   []string `json:"items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.GroupID == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	updated, err := rt.store.AppendGroupItems(req.GroupID, req.Items)
+	if err != nil {
+		http.Error(w, "Append items failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
+		"group":  updated,
+	})
+}
+
+func (rt *Router) handleGroupsRemoveItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		GroupID   string `json:"group_id"`
+		PhotoPath string `json:"photo_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.GroupID == "" || req.PhotoPath == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	updated, err := rt.store.RemoveGroupItem(req.GroupID, req.PhotoPath)
+	if err != nil {
+		http.Error(w, "Remove item failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
+		"group":  updated,
+	})
+}
+
+func (rt *Router) handleGroupsDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	id := req.ID
+	if id == "" {
+		id = r.URL.Query().Get("id")
+	}
+	if id == "" {
+		http.Error(w, "Missing group id", http.StatusBadRequest)
+		return
+	}
+	if err := rt.store.DeleteGroup(id); err != nil {
+		http.Error(w, "Delete group failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
 	})
 }
