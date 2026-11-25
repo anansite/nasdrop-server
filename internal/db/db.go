@@ -41,6 +41,12 @@ func Open(dbPath string) (*Store, error) {
 		height INTEGER NOT NULL DEFAULT 0,
 		has_thumb INTEGER NOT NULL DEFAULT 0,
 		thumb_id TEXT NOT NULL DEFAULT '',
+		voice_id TEXT NOT NULL DEFAULT '',
+		voice_duration_ms INTEGER NOT NULL DEFAULT 0,
+		memo TEXT NOT NULL DEFAULT '',
+		lat REAL NOT NULL DEFAULT 0,
+		lng REAL NOT NULL DEFAULT 0,
+		location_name TEXT NOT NULL DEFAULT '',
 		updated_at INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_photo_dir ON photo_metadata(dir);
@@ -70,8 +76,14 @@ func Open(dbPath string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema failed: %w", err)
 	}
-	// 兼容旧库平滑迁移新增 thumb_id 列
+	// 兼容旧库平滑迁移新增扩展字段
 	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN thumb_id TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN voice_id TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN voice_duration_ms INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN memo TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN lat REAL NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN lng REAL NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE photo_metadata ADD COLUMN location_name TEXT NOT NULL DEFAULT ''")
 
 	return &Store{db: db}, nil
 }
@@ -98,8 +110,8 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 	defer tx.Rollback()
 
 	query := `
-	INSERT INTO photo_metadata (path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO photo_metadata (path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(path) DO UPDATE SET
 		name=excluded.name,
 		dir=excluded.dir,
@@ -110,6 +122,12 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 		height=excluded.height,
 		has_thumb=CASE WHEN excluded.has_thumb = 1 OR excluded.thumb_id != '' THEN 1 ELSE photo_metadata.has_thumb END,
 		thumb_id=CASE WHEN excluded.thumb_id != '' THEN excluded.thumb_id ELSE photo_metadata.thumb_id END,
+		voice_id=CASE WHEN excluded.voice_id != '' THEN excluded.voice_id ELSE photo_metadata.voice_id END,
+		voice_duration_ms=CASE WHEN excluded.voice_duration_ms > 0 THEN excluded.voice_duration_ms ELSE photo_metadata.voice_duration_ms END,
+		memo=CASE WHEN excluded.memo != '' THEN excluded.memo ELSE photo_metadata.memo END,
+		lat=CASE WHEN excluded.lat != 0 THEN excluded.lat ELSE photo_metadata.lat END,
+		lng=CASE WHEN excluded.lng != 0 THEN excluded.lng ELSE photo_metadata.lng END,
+		location_name=CASE WHEN excluded.location_name != '' THEN excluded.location_name ELSE photo_metadata.location_name END,
 		updated_at=excluded.updated_at;
 	`
 	stmt, err := tx.Prepare(query)
@@ -140,6 +158,12 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 			m.Height,
 			hasThumbInt,
 			strings.TrimSpace(m.ThumbID),
+			strings.TrimSpace(m.VoiceID),
+			m.VoiceDurationMs,
+			m.Memo,
+			m.Lat,
+			m.Lng,
+			strings.TrimSpace(m.LocationName),
 			updatedAt,
 		); err != nil {
 			return err
@@ -265,14 +289,14 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	cleanDir := strings.Trim(dir, "/")
 	if cleanDir == "" {
 		rows, err = s.db.Query(`
-			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at
+			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 			FROM photo_metadata
 			ORDER BY taken_at DESC
 			LIMIT ? OFFSET ?
 		`, limit, offset)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at
+			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 			FROM photo_metadata
 			WHERE dir = ? OR dir LIKE ?
 			ORDER BY taken_at DESC
@@ -289,7 +313,7 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	for rows.Next() {
 		var m PhotoMetadata
 		var hasThumbInt int
-		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.ThumbID, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.ThumbID, &m.VoiceID, &m.VoiceDurationMs, &m.Memo, &m.Lat, &m.Lng, &m.LocationName, &m.UpdatedAt); err != nil {
 			continue
 		}
 		m.HasThumb = hasThumbInt == 1
@@ -312,7 +336,7 @@ func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]P
 	defer s.mu.RUnlock()
 
 	query := `
-		SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, updated_at
+		SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 		FROM photo_metadata
 		WHERE taken_at > 0
 		  AND strftime('%m-%d', datetime(taken_at / 1000, 'unixepoch', 'localtime')) = ?
@@ -330,7 +354,7 @@ func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]P
 	for rows.Next() {
 		var m PhotoMetadata
 		var hasThumbInt int
-		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.ThumbID, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.Path, &m.Name, &m.Dir, &m.Size, &m.Modified, &m.TakenAt, &m.Width, &m.Height, &hasThumbInt, &m.ThumbID, &m.VoiceID, &m.VoiceDurationMs, &m.Memo, &m.Lat, &m.Lng, &m.LocationName, &m.UpdatedAt); err != nil {
 			continue
 		}
 		m.HasThumb = hasThumbInt == 1

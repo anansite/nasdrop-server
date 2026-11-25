@@ -9,9 +9,15 @@ type PhotoMetadata struct {
 	TakenAt   int64  `json:"taken_at"`
 	Width     int    `json:"width"`
 	Height    int    `json:"height"`
-	HasThumb  bool   `json:"has_thumb"`
-	ThumbID   string `json:"thumb_id"`
-	UpdatedAt int64  `json:"updated_at"`
+	HasThumb        bool    `json:"has_thumb"`
+	ThumbID         string  `json:"thumb_id"`
+	VoiceID         string  `json:"voice_id"`
+	VoiceDurationMs int64   `json:"voice_duration_ms"`
+	Memo            string  `json:"memo"`
+	Lat             float64 `json:"lat"`
+	Lng             float64 `json:"lng"`
+	LocationName    string  `json:"location_name"`
+	UpdatedAt       int64   `json:"updated_at"`
 }
 
 type TimelineBucket struct {
