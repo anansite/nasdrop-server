@@ -168,6 +168,16 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 		); err != nil {
 			return err
 		}
+		if m.ClearVoice {
+			if _, err := tx.Exec(`UPDATE photo_metadata SET voice_id='', voice_duration_ms=0, updated_at=? WHERE path=?`, updatedAt, strings.Trim(m.Path, "/")); err != nil {
+				return err
+			}
+		}
+		if m.ClearMemo {
+			if _, err := tx.Exec(`UPDATE photo_metadata SET memo='', updated_at=? WHERE path=?`, updatedAt, strings.Trim(m.Path, "/")); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }

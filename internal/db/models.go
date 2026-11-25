@@ -13,7 +13,9 @@ type PhotoMetadata struct {
 	ThumbID         string  `json:"thumb_id"`
 	VoiceID         string  `json:"voice_id"`
 	VoiceDurationMs int64   `json:"voice_duration_ms"`
+	ClearVoice      bool    `json:"clear_voice,omitempty"`
 	Memo            string  `json:"memo"`
+	ClearMemo       bool    `json:"clear_memo,omitempty"`
 	Lat             float64 `json:"lat"`
 	Lng             float64 `json:"lng"`
 	LocationName    string  `json:"location_name"`
