@@ -30,6 +30,7 @@ func (rt *Router) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/metadata", rt.handleMetadata)
 	mux.HandleFunc("/api/timeline", rt.handleTimeline)
 	mux.HandleFunc("/api/sync-dir", rt.handleSyncDir)
+	mux.HandleFunc("/api/stats", rt.handleStats)
 	mux.HandleFunc("/api/memories", rt.handleMemories)
 	mux.HandleFunc("/api/reconcile", rt.handleReconcile)
 	mux.HandleFunc("/api/thumbnail", rt.handleThumbnail)
@@ -172,6 +173,26 @@ func (rt *Router) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		"total":    total,
 		"has_more": hasMore,
 		"items":    list,
+	})
+}
+
+func (rt *Router) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	st, err := rt.store.GetStats()
+	if err != nil {
+		http.Error(w, "Query stats failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":   "ok",
+		"photos":   st.Photos,
+		"videos":   st.Videos,
+		"albums":   st.Albums,
+		"memories": st.Memories,
 	})
 }
 

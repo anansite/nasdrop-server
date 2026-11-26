@@ -332,6 +332,49 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	return list, nil
 }
 
+type Stats struct {
+	Photos   int `json:"photos"`
+	Videos   int `json:"videos"`
+	Albums   int `json:"albums"`
+	Memories int `json:"memories"`
+}
+
+func (s *Store) GetStats() (Stats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var st Stats
+	rows, err := s.db.Query(`SELECT path, dir, voice_id, memo FROM photo_metadata`)
+	if err != nil {
+		return st, err
+	}
+	defer rows.Close()
+
+	albumSet := make(map[string]bool)
+	for rows.Next() {
+		var p, dir, voiceID, memo string
+		if err := rows.Scan(&p, &dir, &voiceID, &memo); err != nil {
+			continue
+		}
+		lower := strings.ToLower(p)
+		if strings.HasSuffix(lower, ".mp4") || strings.HasSuffix(lower, ".mov") || strings.HasSuffix(lower, ".mkv") ||
+			strings.HasSuffix(lower, ".avi") || strings.HasSuffix(lower, ".webm") || strings.HasSuffix(lower, ".m4v") ||
+			strings.HasSuffix(lower, ".3gp") {
+			st.Videos++
+		} else {
+			st.Photos++
+		}
+		if dir != "" {
+			albumSet[dir] = true
+		}
+		if voiceID != "" || memo != "" {
+			st.Memories++
+		}
+	}
+	st.Albums = len(albumSet)
+	return st, nil
+}
+
 func (s *Store) GetTimelineCount(dir string) (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
