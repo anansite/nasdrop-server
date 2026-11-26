@@ -343,35 +343,21 @@ func (s *Store) GetStats() (Stats, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// 单条 SQL 聚合，避免在 Go 侧把整表读进内存逐行分类、建 map，
+	// 同时把读锁持有时间压到毫秒级，减少与 SyncDir/UpsertBatch 写锁的竞争造成概览延迟。
 	var st Stats
-	rows, err := s.db.Query(`SELECT path, dir, voice_id, memo FROM photo_metadata`)
-	if err != nil {
+	videoCond := `lower(path) LIKE '%.mp4' OR lower(path) LIKE '%.mov' OR lower(path) LIKE '%.mkv' OR ` +
+		`lower(path) LIKE '%.avi' OR lower(path) LIKE '%.webm' OR lower(path) LIKE '%.m4v' OR lower(path) LIKE '%.3gp' OR ` +
+		`lower(path) LIKE '%.ts' OR lower(path) LIKE '%.flv' OR lower(path) LIKE '%.rmvb' OR lower(path) LIKE '%.wmv'`
+	query := `SELECT
+		COALESCE(SUM(CASE WHEN ` + videoCond + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN NOT (` + videoCond + `) THEN 1 ELSE 0 END), 0),
+		COALESCE(COUNT(DISTINCT CASE WHEN dir <> '' THEN dir END), 0),
+		COALESCE(SUM(CASE WHEN voice_id <> '' OR memo <> '' THEN 1 ELSE 0 END), 0)
+		FROM photo_metadata`
+	if err := s.db.QueryRow(query).Scan(&st.Videos, &st.Photos, &st.Albums, &st.Memories); err != nil {
 		return st, err
 	}
-	defer rows.Close()
-
-	albumSet := make(map[string]bool)
-	for rows.Next() {
-		var p, dir, voiceID, memo string
-		if err := rows.Scan(&p, &dir, &voiceID, &memo); err != nil {
-			continue
-		}
-		lower := strings.ToLower(p)
-		if strings.HasSuffix(lower, ".mp4") || strings.HasSuffix(lower, ".mov") || strings.HasSuffix(lower, ".mkv") ||
-			strings.HasSuffix(lower, ".avi") || strings.HasSuffix(lower, ".webm") || strings.HasSuffix(lower, ".m4v") ||
-			strings.HasSuffix(lower, ".3gp") {
-			st.Videos++
-		} else {
-			st.Photos++
-		}
-		if dir != "" {
-			albumSet[dir] = true
-		}
-		if voiceID != "" || memo != "" {
-			st.Memories++
-		}
-	}
-	st.Albums = len(albumSet)
 	return st, nil
 }
 
@@ -390,7 +376,7 @@ func (s *Store) GetTimelineCount(dir string) (int, error) {
 	return total, err
 }
 
-func (s *Store) SyncDir(dir string, live []PhotoMetadata) (int, int, error) {
+func (s *Store) SyncDir(dir string, live []PhotoMetadata, purgeAllowed bool) (int, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -436,17 +422,21 @@ func (s *Store) SyncDir(dir string, live []PhotoMetadata) (int, int, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	var toDelete []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err == nil && !liveMap[p] {
-			toDelete = append(toDelete, p)
+	toDelete := []string{}
+	if purgeAllowed {
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err == nil && !liveMap[p] {
+				toDelete = append(toDelete, p)
+			}
 		}
 	}
 	rows.Close()
 
-	for _, p := range toDelete {
-		_, _ = tx.Exec(`DELETE FROM photo_metadata WHERE path = ?`, p)
+	if purgeAllowed {
+		for _, p := range toDelete {
+			_, _ = tx.Exec(`DELETE FROM photo_metadata WHERE path = ?`, p)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err

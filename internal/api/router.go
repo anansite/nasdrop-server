@@ -208,13 +208,18 @@ func (rt *Router) handleSyncDir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mediaExts := map[string]bool{
-		".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".bmp": true, ".heic": true, ".heif": true, ".avif": true,
+		".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".bmp": true, ".heic": true, ".heif": true, ".avif": true, ".svg": true,
 		".mp4": true, ".mkv": true, ".mov": true, ".webm": true, ".avi": true, ".m4v": true, ".3gp": true,
+		".ts": true, ".flv": true, ".rmvb": true, ".wmv": true,
 	}
 
 	var live []db.PhotoMetadata
+	// 扫描不完整（有目录/文件读失败）时不能 purge：那些文件只是没被看到，不是被删了，
+	// 照常删除会整行 DELETE（thumb_id 一起丢），表现为缩略图「无故消失」。
+	incomplete := false
 	_ = filepath.WalkDir(scanRoot, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
+			incomplete = true
 			return nil
 		}
 		name := d.Name()
@@ -242,6 +247,8 @@ func (rt *Router) handleSyncDir(w http.ResponseWriter, r *http.Request) {
 		}
 		info, err := d.Info()
 		if err != nil {
+			// 单个文件 stat 失败同样会让它缺失于 live，不能因此判定为已删除
+			incomplete = true
 			return nil
 		}
 		modMs := info.ModTime().UnixMilli()
@@ -257,7 +264,7 @@ func (rt *Router) handleSyncDir(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	added, purged, err := rt.store.SyncDir(dir, live)
+	added, purged, err := rt.store.SyncDir(dir, live, !incomplete)
 	if err != nil {
 		http.Error(w, "Sync dir failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -265,11 +272,12 @@ func (rt *Router) handleSyncDir(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status": "ok",
-		"dir":    dir,
-		"total":  len(live),
-		"added":  added,
-		"purged": purged,
+		"status":        "ok",
+		"dir":           dir,
+		"total":         len(live),
+		"added":         added,
+		"purged":        purged,
+		"purge_skipped": incomplete,
 	})
 }
 
