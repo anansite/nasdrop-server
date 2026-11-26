@@ -1,7 +1,10 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +37,7 @@ func (rt *Router) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/memories", rt.handleMemories)
 	mux.HandleFunc("/api/reconcile", rt.handleReconcile)
 	mux.HandleFunc("/api/thumbnail", rt.handleThumbnail)
+	mux.HandleFunc("/api/file-hash", rt.handleFileHash)
 	mux.HandleFunc("/api/groups", rt.handleGroups)
 	mux.HandleFunc("/api/groups/update", rt.handleGroupsUpdate)
 	mux.HandleFunc("/api/groups/append", rt.handleGroupsAppend)
@@ -83,6 +87,53 @@ func (rt *Router) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "Thumbnail not uploaded", http.StatusNotFound)
+}
+
+func (rt *Router) handleFileHash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "Missing path query parameter", http.StatusBadRequest)
+		return
+	}
+	cleanPath := filepath.Clean(filepath.FromSlash(strings.Trim(path, "/")))
+	if cleanPath == "." || cleanPath == "" || strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
+		http.Error(w, "Invalid path: path traversal detected", http.StatusBadRequest)
+		return
+	}
+	absData, err := filepath.Abs(rt.dataDir)
+	if err != nil {
+		http.Error(w, "Server data dir error", http.StatusInternalServerError)
+		return
+	}
+	fullPath := filepath.Join(absData, cleanPath)
+	info, err := os.Stat(fullPath)
+	if err != nil || info.IsDir() {
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+	f, err := os.Open(fullPath)
+	if err != nil {
+		http.Error(w, "Open file failed", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		http.Error(w, "Hash file failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
+		"path":   filepath.ToSlash(cleanPath),
+		"size":   info.Size(),
+		"sha256": hex.EncodeToString(h.Sum(nil)),
+	})
 }
 
 func (rt *Router) handlePing(w http.ResponseWriter, r *http.Request) {
