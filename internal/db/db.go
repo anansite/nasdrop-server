@@ -286,6 +286,49 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 		}
 	}
 
+	// 同步迁移 photo_groups 中的 album_dir 与 items 路径，防止相册改名后集锦丢失
+	gRows, gErr := tx.Query(`SELECT id, album_dir, items_json FROM photo_groups WHERE album_dir = ? OR album_dir LIKE ? OR items_json LIKE ?`,
+		oldClean, oldClean+"/%", "%"+oldClean+"/%")
+	if gErr == nil {
+		type groupMove struct {
+			id       string
+			albumDir string
+			items    string
+		}
+		var gMoves []groupMove
+		for gRows.Next() {
+			var gid, adir, ijson string
+			if err := gRows.Scan(&gid, &adir, &ijson); err != nil {
+				continue
+			}
+			newADir := adir
+			if adir == oldClean || strings.HasPrefix(adir, oldClean+"/") {
+				newADir = newClean + strings.TrimPrefix(adir, oldClean)
+			}
+			var items []string
+			newItemsJSON := ijson
+			if json.Unmarshal([]byte(ijson), &items) == nil {
+				changed := false
+				for i, p := range items {
+					if p == oldClean || strings.HasPrefix(p, oldClean+"/") {
+						items[i] = newClean + strings.TrimPrefix(p, oldClean)
+						changed = true
+					}
+				}
+				if changed {
+					if b, err := json.Marshal(items); err == nil {
+						newItemsJSON = string(b)
+					}
+				}
+			}
+			gMoves = append(gMoves, groupMove{id: gid, albumDir: newADir, items: newItemsJSON})
+		}
+		gRows.Close()
+		for _, gm := range gMoves {
+			_, _ = tx.Exec(`UPDATE photo_groups SET album_dir = ?, items_json = ?, updated_at = ? WHERE id = ?`, gm.albumDir, gm.items, now, gm.id)
+		}
+	}
+
 	return tx.Commit()
 }
 
