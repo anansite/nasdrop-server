@@ -332,6 +332,85 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	return list, nil
 }
 
+func (s *Store) GetTimelineCount(dir string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	cleanDir := strings.Trim(dir, "/")
+	var total int
+	var err error
+	if cleanDir == "" {
+		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata`).Scan(&total)
+	} else {
+		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata WHERE dir = ? OR dir LIKE ?`, cleanDir, cleanDir+"/%").Scan(&total)
+	}
+	return total, err
+}
+
+func (s *Store) SyncDir(dir string, live []PhotoMetadata) (int, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cleanDir := strings.Trim(dir, "/")
+	liveMap := make(map[string]bool, len(live))
+	for _, m := range live {
+		liveMap[strings.Trim(m.Path, "/")] = true
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT OR IGNORE INTO photo_metadata (path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, '', '', 0, '', 0, 0, '', ?)
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer stmt.Close()
+
+	now := time.Now().UnixMilli()
+	added := 0
+	for _, m := range live {
+		res, err := stmt.Exec(strings.Trim(m.Path, "/"), m.Name, strings.Trim(m.Dir, "/"), m.Size, m.Modified, m.TakenAt, now)
+		if err != nil {
+			return 0, 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			added++
+		}
+	}
+
+	var rows *sql.Rows
+	if cleanDir == "" {
+		rows, err = tx.Query(`SELECT path FROM photo_metadata`)
+	} else {
+		rows, err = tx.Query(`SELECT path FROM photo_metadata WHERE dir = ? OR dir LIKE ?`, cleanDir, cleanDir+"/%")
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	var toDelete []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err == nil && !liveMap[p] {
+			toDelete = append(toDelete, p)
+		}
+	}
+	rows.Close()
+
+	for _, p := range toDelete {
+		_, _ = tx.Exec(`DELETE FROM photo_metadata WHERE path = ?`, p)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return added, len(toDelete), nil
+}
+
 func (s *Store) GetThumbID(path string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

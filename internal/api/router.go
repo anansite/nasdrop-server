@@ -29,6 +29,7 @@ func (rt *Router) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/system", rt.handleSystem)
 	mux.HandleFunc("/api/metadata", rt.handleMetadata)
 	mux.HandleFunc("/api/timeline", rt.handleTimeline)
+	mux.HandleFunc("/api/sync-dir", rt.handleSyncDir)
 	mux.HandleFunc("/api/memories", rt.handleMemories)
 	mux.HandleFunc("/api/reconcile", rt.handleReconcile)
 	mux.HandleFunc("/api/thumbnail", rt.handleThumbnail)
@@ -161,13 +162,126 @@ func (rt *Router) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Query timeline failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	total, _ := rt.store.GetTimelineCount(dir)
+	hasMore := offset+len(list) < total
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":   "ok",
+		"count":    len(list),
+		"total":    total,
+		"has_more": hasMore,
+		"items":    list,
+	})
+}
+
+func (rt *Router) handleSyncDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	dir := strings.Trim(r.URL.Query().Get("dir"), "/")
+	scanRoot := rt.dataDir
+	if dir != "" {
+		scanRoot = filepath.Join(rt.dataDir, filepath.FromSlash(dir))
+	}
+
+	mediaExts := map[string]bool{
+		".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".bmp": true, ".heic": true, ".heif": true, ".avif": true,
+		".mp4": true, ".mkv": true, ".mov": true, ".webm": true, ".avi": true, ".m4v": true, ".3gp": true,
+	}
+
+	var live []db.PhotoMetadata
+	_ = filepath.WalkDir(scanRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if p != scanRoot && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(name, ".") {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if !mediaExts[ext] {
+			return nil
+		}
+		rel, err := filepath.Rel(rt.dataDir, p)
+		if err != nil {
+			return nil
+		}
+		relSlash := filepath.ToSlash(rel)
+		parentSlash := ""
+		if idx := strings.LastIndex(relSlash, "/"); idx > 0 {
+			parentSlash = relSlash[:idx]
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		modMs := info.ModTime().UnixMilli()
+		takenAt := parseTakenAtFromName(name, modMs)
+		live = append(live, db.PhotoMetadata{
+			Path:     relSlash,
+			Name:     name,
+			Dir:      parentSlash,
+			Size:     info.Size(),
+			Modified: modMs,
+			TakenAt:  takenAt,
+		})
+		return nil
+	})
+
+	added, purged, err := rt.store.SyncDir(dir, live)
+	if err != nil {
+		http.Error(w, "Sync dir failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": "ok",
-		"count":  len(list),
-		"items":  list,
+		"dir":    dir,
+		"total":  len(live),
+		"added":  added,
+		"purged": purged,
 	})
+}
+
+func parseTakenAtFromName(name string, fallbackMs int64) int64 {
+	// 匹配常见 YYYYMMDD_HHMMSS
+	for i := 0; i+15 <= len(name); i++ {
+		if name[i] >= '1' && name[i] <= '2' && name[i+8] == '_' {
+			seg := name[i : i+15]
+			if t, err := time.ParseInLocation("20060102_150405", seg, time.Local); err == nil {
+				return t.UnixMilli()
+			}
+		}
+	}
+	// 匹配 13 位毫秒时间戳（如 wx_camera_1795... / 1795335229888.png）
+	digits := 0
+	start := -1
+	for i := 0; i <= len(name); i++ {
+		if i < len(name) && name[i] >= '0' && name[i] <= '9' {
+			if digits == 0 {
+				start = i
+			}
+			digits++
+		} else {
+			if digits == 13 && start >= 0 {
+				if ms, err := strconv.ParseInt(name[start:start+13], 10, 64); err == nil && ms > 1000000000000 {
+					return ms
+				}
+			}
+			digits = 0
+			start = -1
+		}
+	}
+	return fallbackMs
 }
 
 // 获取“那年今天”历史同一天的照片与视频列表
