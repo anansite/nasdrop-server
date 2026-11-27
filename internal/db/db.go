@@ -2,7 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -18,17 +17,20 @@ type Store struct {
 }
 
 func Open(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	// 通过 DSN 参数设置 PRAGMAs，确保连接池中所有连接都生效
+	dsn := dbPath +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=busy_timeout(5000)" +
+		"&_pragma=cache_size(-2000)" +
+		"&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db failed: %w", err)
 	}
 
-	// 启用 WAL 模式提高读写并发性能与死锁超时保护
-	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
-	_, _ = db.Exec("PRAGMA synchronous=NORMAL;")
-	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
-	_, _ = db.Exec("PRAGMA cache_size=-2000;")
-	_, _ = db.Exec("PRAGMA foreign_keys=ON;")
+	// 限制连接数：SQLite 单写者模型，多连接无意义且会丢失 PRAGMA 状态
+	db.SetMaxOpenConns(2)
 
 	schema := `
 	CREATE TABLE IF NOT EXISTS photo_metadata (
@@ -75,6 +77,7 @@ func Open(dbPath string) (*Store, error) {
 	CREATE INDEX IF NOT EXISTS idx_group_items_path ON photo_group_items(photo_path);
 	`
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("create schema failed: %w", err)
 	}
 	// 兼容旧库平滑迁移新增扩展字段
@@ -91,6 +94,12 @@ func Open(dbPath string) (*Store, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// escapeLike 转义 SQL LIKE 中的 %、_ 和 \ 通配符，防止路径名含特殊字符时匹配错误
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 func (s *Store) Upsert(meta *PhotoMetadata) error {
@@ -188,9 +197,23 @@ func (s *Store) Delete(path string) error {
 	defer s.mu.Unlock()
 
 	clean := strings.Trim(path, "/")
-	_, _ = s.db.Exec("DELETE FROM photo_group_items WHERE photo_path = ?", clean)
-	_, err := s.db.Exec("DELETE FROM photo_metadata WHERE path = ?", clean)
-	return err
+	if clean == "" {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM photo_group_items WHERE photo_path = ?", clean); err != nil {
+		log.Printf("[DB] Delete group_items for %s: %v", clean, err)
+	}
+	if _, err := tx.Exec("DELETE FROM photo_metadata WHERE path = ?", clean); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteDir(dirPrefix string) error {
@@ -199,13 +222,27 @@ func (s *Store) DeleteDir(dirPrefix string) error {
 
 	clean := strings.Trim(dirPrefix, "/")
 	if clean == "" {
-		_, _ = s.db.Exec("DELETE FROM photo_group_items")
-		_, err := s.db.Exec("DELETE FROM photo_metadata")
+		return nil // 拒绝清空全库
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	_, _ = s.db.Exec("DELETE FROM photo_group_items WHERE photo_path = ? OR photo_path LIKE ?", clean, clean+"/%")
-	_, err := s.db.Exec("DELETE FROM photo_metadata WHERE path = ? OR path LIKE ?", clean, clean+"/%")
-	return err
+	defer tx.Rollback()
+
+	escaped := escapeLike(clean)
+	if _, err := tx.Exec("DELETE FROM photo_group_items WHERE photo_path = ? OR photo_path LIKE ? ESCAPE '\\'", clean, escaped+"/%"); err != nil {
+		log.Printf("[DB] DeleteDir group_items for %s: %v", clean, err)
+	}
+	// 同步删除该目录下的 photo_groups
+	if _, err := tx.Exec("DELETE FROM photo_groups WHERE album_dir = ? OR album_dir LIKE ? ESCAPE '\\'", clean, escaped+"/%"); err != nil {
+		log.Printf("[DB] DeleteDir groups for %s: %v", clean, err)
+	}
+	if _, err := tx.Exec("DELETE FROM photo_metadata WHERE path = ? OR path LIKE ? ESCAPE '\\'", clean, escaped+"/%"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Move(oldPath, newPath string) error {
@@ -214,6 +251,9 @@ func (s *Store) Move(oldPath, newPath string) error {
 
 	oldClean := strings.Trim(oldPath, "/")
 	newClean := strings.Trim(newPath, "/")
+	if oldClean == "" || newClean == "" || oldClean == newClean {
+		return nil
+	}
 
 	newName := newClean
 	newDir := ""
@@ -222,14 +262,21 @@ func (s *Store) Move(oldPath, newPath string) error {
 		newName = newClean[idx+1:]
 	}
 
-	_, _ = s.db.Exec("UPDATE photo_group_items SET photo_path = ? WHERE photo_path = ?", newClean, oldClean)
-	query := `
-	UPDATE photo_metadata 
-	SET path = ?, name = ?, dir = ?, updated_at = ?
-	WHERE path = ?;
-	`
-	_, err := s.db.Exec(query, newClean, newName, newDir, time.Now().UnixMilli(), oldClean)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UnixMilli()
+	if _, err := tx.Exec("UPDATE photo_group_items SET photo_path = ? WHERE photo_path = ?", newClean, oldClean); err != nil {
+		log.Printf("[DB] Move group_items %s->%s: %v", oldClean, newClean, err)
+	}
+	if _, err := tx.Exec(`UPDATE photo_metadata SET path = ?, name = ?, dir = ?, updated_at = ? WHERE path = ?`,
+		newClean, newName, newDir, now, oldClean); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
@@ -238,8 +285,12 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 
 	oldClean := strings.Trim(oldPrefix, "/")
 	newClean := strings.Trim(newPrefix, "/")
+	if oldClean == "" || newClean == "" || oldClean == newClean {
+		return nil
+	}
 
-	rows, err := s.db.Query("SELECT path, name, dir FROM photo_metadata WHERE path = ? OR path LIKE ?", oldClean, oldClean+"/%")
+	escaped := escapeLike(oldClean)
+	rows, err := s.db.Query("SELECT path, name, dir FROM photo_metadata WHERE path = ? OR path LIKE ? ESCAPE '\\'", oldClean, escaped+"/%")
 	if err != nil {
 		return err
 	}
@@ -267,6 +318,9 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 		}
 		moves = append(moves, moveItem{oldP: p, newP: replaced, newN: newN, newD: newD})
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -274,59 +328,70 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 	}
 	defer tx.Rollback()
 
+	now := time.Now().UnixMilli()
+
+	// 1. 迁移 photo_metadata 路径
 	stmt, err := tx.Prepare("UPDATE photo_metadata SET path = ?, name = ?, dir = ?, updated_at = ? WHERE path = ?")
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
-	now := time.Now().UnixMilli()
 	for _, m := range moves {
 		if _, err := stmt.Exec(m.newP, m.newN, m.newD, now, m.oldP); err != nil {
 			log.Printf("[DB] MoveDir update error for %s: %v", m.oldP, err)
 		}
 	}
 
-	// 同步迁移 photo_groups 中的 album_dir 与 items 路径，防止相册改名后集锦丢失
-	gRows, gErr := tx.Query(`SELECT id, album_dir, items_json FROM photo_groups WHERE album_dir = ? OR album_dir LIKE ? OR items_json LIKE ?`,
-		oldClean, oldClean+"/%", "%"+oldClean+"/%")
-	if gErr == nil {
-		type groupMove struct {
-			id       string
-			albumDir string
-			items    string
+	// 2. 迁移 photo_groups.album_dir（使用 ESCAPE 安全的 LIKE）
+	if _, err := tx.Exec(`UPDATE photo_groups SET album_dir = ?, updated_at = ? WHERE album_dir = ?`,
+		newClean, now, oldClean); err != nil {
+		log.Printf("[DB] MoveDir update groups exact %s: %v", oldClean, err)
+	}
+	// 子目录 album_dir 前缀替换
+	gRows, err := tx.Query(`SELECT id, album_dir FROM photo_groups WHERE album_dir LIKE ? ESCAPE '\'`, escaped+"/%")
+	if err == nil {
+		type gm struct {
+			id  string
+			dir string
 		}
-		var gMoves []groupMove
+		var gMoves []gm
 		for gRows.Next() {
-			var gid, adir, ijson string
-			if err := gRows.Scan(&gid, &adir, &ijson); err != nil {
+			var gid, adir string
+			if err := gRows.Scan(&gid, &adir); err != nil {
 				continue
 			}
-			newADir := adir
-			if adir == oldClean || strings.HasPrefix(adir, oldClean+"/") {
-				newADir = newClean + strings.TrimPrefix(adir, oldClean)
-			}
-			var items []string
-			newItemsJSON := ijson
-			if json.Unmarshal([]byte(ijson), &items) == nil {
-				changed := false
-				for i, p := range items {
-					if p == oldClean || strings.HasPrefix(p, oldClean+"/") {
-						items[i] = newClean + strings.TrimPrefix(p, oldClean)
-						changed = true
-					}
-				}
-				if changed {
-					if b, err := json.Marshal(items); err == nil {
-						newItemsJSON = string(b)
-					}
-				}
-			}
-			gMoves = append(gMoves, groupMove{id: gid, albumDir: newADir, items: newItemsJSON})
+			gMoves = append(gMoves, gm{id: gid, dir: newClean + strings.TrimPrefix(adir, oldClean)})
 		}
 		gRows.Close()
-		for _, gm := range gMoves {
-			_, _ = tx.Exec(`UPDATE photo_groups SET album_dir = ?, items_json = ?, updated_at = ? WHERE id = ?`, gm.albumDir, gm.items, now, gm.id)
+		for _, g := range gMoves {
+			if _, err := tx.Exec(`UPDATE photo_groups SET album_dir = ?, updated_at = ? WHERE id = ?`, g.dir, now, g.id); err != nil {
+				log.Printf("[DB] MoveDir update group %s album_dir: %v", g.id, err)
+			}
+		}
+	}
+
+	// 3. 迁移 photo_group_items.photo_path
+	iRows, err := tx.Query(`SELECT group_id, photo_path FROM photo_group_items WHERE photo_path = ? OR photo_path LIKE ? ESCAPE '\'`, oldClean, escaped+"/%")
+	if err == nil {
+		type im struct {
+			gid  string
+			oldP string
+			newP string
+		}
+		var iMoves []im
+		for iRows.Next() {
+			var gid, pp string
+			if err := iRows.Scan(&gid, &pp); err != nil {
+				continue
+			}
+			iMoves = append(iMoves, im{gid: gid, oldP: pp, newP: newClean + strings.TrimPrefix(pp, oldClean)})
+		}
+		iRows.Close()
+		for _, m := range iMoves {
+			if _, err := tx.Exec(`UPDATE photo_group_items SET photo_path = ? WHERE group_id = ? AND photo_path = ?`, m.newP, m.gid, m.oldP); err != nil {
+				log.Printf("[DB] MoveDir update group_item %s/%s: %v", m.gid, m.oldP, err)
+			}
 		}
 	}
 
@@ -345,17 +410,18 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 		rows, err = s.db.Query(`
 			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 			FROM photo_metadata
-			ORDER BY taken_at DESC
+			ORDER BY taken_at DESC, path ASC
 			LIMIT ? OFFSET ?
 		`, limit, offset)
 	} else {
+		escaped := escapeLike(cleanDir)
 		rows, err = s.db.Query(`
 			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 			FROM photo_metadata
-			WHERE dir = ? OR dir LIKE ?
-			ORDER BY taken_at DESC
+			WHERE dir = ? OR dir LIKE ? ESCAPE '\'
+			ORDER BY taken_at DESC, path ASC
 			LIMIT ? OFFSET ?
-		`, cleanDir, cleanDir+"/%", limit, offset)
+		`, cleanDir, escaped+"/%", limit, offset)
 	}
 
 	if err != nil {
@@ -363,7 +429,7 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 	}
 	defer rows.Close()
 
-	var list []PhotoMetadata
+	list := make([]PhotoMetadata, 0) // 保证 JSON 序列化为 [] 而非 null
 	for rows.Next() {
 		var m PhotoMetadata
 		var hasThumbInt int
@@ -372,6 +438,9 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 		}
 		m.HasThumb = hasThumbInt == 1
 		list = append(list, m)
+	}
+	if err := rows.Err(); err != nil {
+		return list, err
 	}
 	return list, nil
 }
@@ -387,8 +456,6 @@ func (s *Store) GetStats() (Stats, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// 单条 SQL 聚合，避免在 Go 侧把整表读进内存逐行分类、建 map，
-	// 同时把读锁持有时间压到毫秒级，减少与 SyncDir/UpsertBatch 写锁的竞争造成概览延迟。
 	var st Stats
 	videoCond := `lower(path) LIKE '%.mp4' OR lower(path) LIKE '%.mov' OR lower(path) LIKE '%.mkv' OR ` +
 		`lower(path) LIKE '%.avi' OR lower(path) LIKE '%.webm' OR lower(path) LIKE '%.m4v' OR lower(path) LIKE '%.3gp' OR ` +
@@ -415,7 +482,8 @@ func (s *Store) GetTimelineCount(dir string) (int, error) {
 	if cleanDir == "" {
 		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata`).Scan(&total)
 	} else {
-		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata WHERE dir = ? OR dir LIKE ?`, cleanDir, cleanDir+"/%").Scan(&total)
+		escaped := escapeLike(cleanDir)
+		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata WHERE dir = ? OR dir LIKE ? ESCAPE '\'`, cleanDir, escaped+"/%").Scan(&total)
 	}
 	return total, err
 }
@@ -461,7 +529,8 @@ func (s *Store) SyncDir(dir string, live []PhotoMetadata, purgeAllowed bool) (in
 	if cleanDir == "" {
 		rows, err = tx.Query(`SELECT path FROM photo_metadata`)
 	} else {
-		rows, err = tx.Query(`SELECT path FROM photo_metadata WHERE dir = ? OR dir LIKE ?`, cleanDir, cleanDir+"/%")
+		escaped := escapeLike(cleanDir)
+		rows, err = tx.Query(`SELECT path FROM photo_metadata WHERE dir = ? OR dir LIKE ? ESCAPE '\'`, cleanDir, escaped+"/%")
 	}
 	if err != nil {
 		return 0, 0, err
@@ -476,10 +545,26 @@ func (s *Store) SyncDir(dir string, live []PhotoMetadata, purgeAllowed bool) (in
 		}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
 
-	if purgeAllowed {
+	if purgeAllowed && len(toDelete) > 0 {
+		delMeta, _ := tx.Prepare(`DELETE FROM photo_metadata WHERE path = ?`)
+		delItem, _ := tx.Prepare(`DELETE FROM photo_group_items WHERE photo_path = ?`)
+		if delMeta != nil {
+			defer delMeta.Close()
+		}
+		if delItem != nil {
+			defer delItem.Close()
+		}
 		for _, p := range toDelete {
-			_, _ = tx.Exec(`DELETE FROM photo_metadata WHERE path = ?`, p)
+			if delItem != nil {
+				_, _ = delItem.Exec(p)
+			}
+			if delMeta != nil {
+				_, _ = delMeta.Exec(p)
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -516,7 +601,7 @@ func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]P
 	}
 	defer rows.Close()
 
-	var list []PhotoMetadata
+	list := make([]PhotoMetadata, 0)
 	for rows.Next() {
 		var m PhotoMetadata
 		var hasThumbInt int
@@ -525,6 +610,9 @@ func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]P
 		}
 		m.HasThumb = hasThumbInt == 1
 		list = append(list, m)
+	}
+	if err := rows.Err(); err != nil {
+		return list, err
 	}
 	return list, nil
 }
@@ -554,19 +642,32 @@ func (s *Store) Reconcile(dir string, livePaths []string) ([]string, error) {
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	if len(toDelete) > 0 {
 		tx, err := s.db.Begin()
-		if err == nil {
-			defer tx.Rollback()
-			stmt, err := tx.Prepare("DELETE FROM photo_metadata WHERE path = ?")
-			if err == nil {
-				defer stmt.Close()
-				for _, p := range toDelete {
-					_, _ = stmt.Exec(p)
-				}
-				_ = tx.Commit()
-			}
+		if err != nil {
+			return nil, err
+		}
+		defer tx.Rollback()
+		delMeta, err := tx.Prepare("DELETE FROM photo_metadata WHERE path = ?")
+		if err != nil {
+			return nil, err
+		}
+		defer delMeta.Close()
+		delItem, err := tx.Prepare("DELETE FROM photo_group_items WHERE photo_path = ?")
+		if err != nil {
+			return nil, err
+		}
+		defer delItem.Close()
+		for _, p := range toDelete {
+			_, _ = delItem.Exec(p)
+			_, _ = delMeta.Exec(p)
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
 		}
 	}
 	return toDelete, nil
@@ -597,6 +698,7 @@ func (s *Store) listGroupsLocked(albumDir string) ([]PhotoGroup, error) {
 
 	groups := make([]PhotoGroup, 0)
 	idxByID := make(map[string]int)
+	var groupIDs []string
 	for rows.Next() {
 		var g PhotoGroup
 		if err := rows.Scan(&g.ID, &g.AlbumDir, &g.Title, &g.Memo, &g.CreatedAt, &g.UpdatedAt); err != nil {
@@ -604,14 +706,26 @@ func (s *Store) listGroupsLocked(albumDir string) ([]PhotoGroup, error) {
 		}
 		g.Items = []string{}
 		idxByID[g.ID] = len(groups)
+		groupIDs = append(groupIDs, g.ID)
 		groups = append(groups, g)
+	}
+	if err := rows.Err(); err != nil {
+		return groups, err
 	}
 
 	if len(groups) == 0 {
 		return groups, nil
 	}
 
-	itemRows, err := s.db.Query(`SELECT group_id, photo_path FROM photo_group_items ORDER BY sort_order ASC, added_at ASC`)
+	// 仅查询当前结果集中的 group_items，避免全表扫描
+	placeholders := make([]string, len(groupIDs))
+	args := make([]any, len(groupIDs))
+	for i, id := range groupIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	itemQuery := `SELECT group_id, photo_path FROM photo_group_items WHERE group_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY sort_order ASC, added_at ASC`
+	itemRows, err := s.db.Query(itemQuery, args...)
 	if err != nil {
 		return groups, nil
 	}
@@ -626,6 +740,7 @@ func (s *Store) listGroupsLocked(albumDir string) ([]PhotoGroup, error) {
 			groups[i].Items = append(groups[i].Items, p)
 		}
 	}
+	_ = itemRows.Err()
 	return groups, nil
 }
 
@@ -800,10 +915,20 @@ func (s *Store) RemoveGroupItem(groupID, photoPath string) (*PhotoGroup, error) 
 
 	clean := strings.Trim(photoPath, "/")
 	now := time.Now().UnixMilli()
-	if _, err := s.db.Exec(`DELETE FROM photo_group_items WHERE group_id = ? AND photo_path = ?`, groupID, clean); err != nil {
+
+	tx, err := s.db.Begin()
+	if err != nil {
 		return nil, err
 	}
-	_, _ = s.db.Exec(`UPDATE photo_groups SET updated_at = ? WHERE id = ?`, now, groupID)
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM photo_group_items WHERE group_id = ? AND photo_path = ?`, groupID, clean); err != nil {
+		return nil, err
+	}
+	_, _ = tx.Exec(`UPDATE photo_groups SET updated_at = ? WHERE id = ?`, now, groupID)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return s.getGroupByIDLocked(groupID)
 }
 

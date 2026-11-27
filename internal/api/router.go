@@ -46,6 +46,10 @@ func (rt *Router) Register(mux *http.ServeMux) {
 }
 
 func (rt *Router) handleThumbnail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		http.Error(w, "Missing path query parameter", http.StatusBadRequest)
@@ -161,6 +165,10 @@ func (rt *Router) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(raw) == 0 {
+		http.Error(w, "Empty body", http.StatusBadRequest)
+		return
+	}
 	if raw[0] == '[' {
 		if err := json.Unmarshal(raw, &metas); err != nil {
 			http.Error(w, "Invalid array: "+err.Error(), http.StatusBadRequest)
@@ -172,7 +180,23 @@ func (rt *Router) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid object: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if strings.TrimSpace(single.Path) == "" {
+			http.Error(w, "Missing required field: path", http.StatusBadRequest)
+			return
+		}
 		metas = append(metas, single)
+	}
+	// 过滤掉空路径条目
+	filtered := metas[:0]
+	for _, m := range metas {
+		if strings.TrimSpace(m.Path) != "" {
+			filtered = append(filtered, m)
+		}
+	}
+	metas = filtered
+	if len(metas) == 0 {
+		http.Error(w, "No valid metadata items", http.StatusBadRequest)
+		return
 	}
 
 	if err := rt.store.UpsertBatch(metas); err != nil {
@@ -255,7 +279,30 @@ func (rt *Router) handleSyncDir(w http.ResponseWriter, r *http.Request) {
 	dir := strings.Trim(r.URL.Query().Get("dir"), "/")
 	scanRoot := rt.dataDir
 	if dir != "" {
-		scanRoot = filepath.Join(rt.dataDir, filepath.FromSlash(dir))
+		// 防止路径穿越和扫描内部隐藏目录
+		cleanDir := filepath.Clean(filepath.FromSlash(dir))
+		if cleanDir == "." || cleanDir == "" || strings.HasPrefix(cleanDir, "..") || filepath.IsAbs(cleanDir) || strings.HasPrefix(filepath.Base(cleanDir), ".") {
+			http.Error(w, "Invalid dir: path traversal or hidden directory detected", http.StatusBadRequest)
+			return
+		}
+		// 检查每段路径是否包含隐藏目录
+		for _, seg := range strings.Split(cleanDir, string(filepath.Separator)) {
+			if strings.HasPrefix(seg, ".") {
+				http.Error(w, "Invalid dir: hidden directory not allowed", http.StatusBadRequest)
+				return
+			}
+		}
+		absData, err := filepath.Abs(rt.dataDir)
+		if err != nil {
+			http.Error(w, "Server data dir error", http.StatusInternalServerError)
+			return
+		}
+		scanRoot = filepath.Join(absData, cleanDir)
+		if !strings.HasPrefix(scanRoot, absData+string(filepath.Separator)) && scanRoot != absData {
+			http.Error(w, "Invalid dir: outside data directory", http.StatusBadRequest)
+			return
+		}
+		dir = filepath.ToSlash(cleanDir) // 规范化传给 DB 的 dir
 	}
 
 	mediaExts := map[string]bool{

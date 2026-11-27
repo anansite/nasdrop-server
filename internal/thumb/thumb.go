@@ -111,7 +111,7 @@ func GetOrGenerate(dataDir, cacheDir, relPath string, maxDim int) (string, error
 		return "", fmt.Errorf("resolve data dir failed: %w", err)
 	}
 	fullPath := filepath.Join(absData, cleanRel)
-	if !strings.HasPrefix(fullPath, absData) {
+	if !strings.HasPrefix(fullPath, absData+string(filepath.Separator)) && fullPath != absData {
 		return "", fmt.Errorf("access denied: path outside data directory")
 	}
 
