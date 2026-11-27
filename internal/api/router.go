@@ -221,6 +221,7 @@ func (rt *Router) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	offset := 0
 	dir := r.URL.Query().Get("dir")
+	sortBy := r.URL.Query().Get("sort")
 
 	if lStr := r.URL.Query().Get("limit"); lStr != "" {
 		if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 500 {
@@ -233,7 +234,7 @@ func (rt *Router) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	list, err := rt.store.GetTimeline(limit, offset, dir)
+	list, err := rt.store.GetTimeline(limit, offset, dir, sortBy)
 	if err != nil {
 		http.Error(w, "Query timeline failed: "+err.Error(), http.StatusInternalServerError)
 		return

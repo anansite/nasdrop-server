@@ -123,13 +123,13 @@ func (s *Store) UpsertBatch(metas []PhotoMetadata) error {
 	INSERT INTO photo_metadata (path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(path) DO UPDATE SET
-		name=excluded.name,
-		dir=excluded.dir,
-		size=excluded.size,
-		modified=excluded.modified,
-		taken_at=excluded.taken_at,
-		width=excluded.width,
-		height=excluded.height,
+		name=CASE WHEN excluded.name != '' THEN excluded.name ELSE photo_metadata.name END,
+		dir=CASE WHEN excluded.dir != '' OR photo_metadata.dir = '' THEN excluded.dir ELSE photo_metadata.dir END,
+		size=CASE WHEN excluded.size > 0 THEN excluded.size ELSE photo_metadata.size END,
+		modified=CASE WHEN excluded.modified > 0 THEN excluded.modified ELSE photo_metadata.modified END,
+		taken_at=CASE WHEN excluded.taken_at > 0 THEN excluded.taken_at ELSE photo_metadata.taken_at END,
+		width=CASE WHEN excluded.width > 0 THEN excluded.width ELSE photo_metadata.width END,
+		height=CASE WHEN excluded.height > 0 THEN excluded.height ELSE photo_metadata.height END,
 		has_thumb=CASE WHEN excluded.has_thumb = 1 OR excluded.thumb_id != '' THEN 1 ELSE photo_metadata.has_thumb END,
 		thumb_id=CASE WHEN excluded.thumb_id != '' THEN excluded.thumb_id ELSE photo_metadata.thumb_id END,
 		voice_id=CASE WHEN excluded.voice_id != '' THEN excluded.voice_id ELSE photo_metadata.voice_id END,
@@ -398,9 +398,14 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 	return tx.Commit()
 }
 
-func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, error) {
+func (s *Store) GetTimeline(limit, offset int, dir string, sortBy string) ([]PhotoMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	orderClause := "ORDER BY taken_at DESC, path ASC"
+	if sortBy == "modified" {
+		orderClause = "ORDER BY modified DESC, updated_at DESC, path ASC"
+	}
 
 	var rows *sql.Rows
 	var err error
@@ -410,7 +415,7 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 		rows, err = s.db.Query(`
 			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 			FROM photo_metadata
-			ORDER BY taken_at DESC, path ASC
+			`+orderClause+`
 			LIMIT ? OFFSET ?
 		`, limit, offset)
 	} else {
@@ -419,7 +424,7 @@ func (s *Store) GetTimeline(limit, offset int, dir string) ([]PhotoMetadata, err
 			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 			FROM photo_metadata
 			WHERE dir = ? OR dir LIKE ? ESCAPE '\'
-			ORDER BY taken_at DESC, path ASC
+			`+orderClause+`
 			LIMIT ? OFFSET ?
 		`, cleanDir, escaped+"/%", limit, offset)
 	}
