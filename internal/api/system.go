@@ -225,7 +225,7 @@ func readCPUPercent(cores int, loadAvg []float64) float64 {
 				}
 
 				now := time.Now()
-				if !lastCPUTime.IsZero() && total > lastCPUTotal {
+				if !lastCPUTime.IsZero() && total > lastCPUTotal && idle >= lastCPUIdle {
 					diffTotal := total - lastCPUTotal
 					diffIdle := idle - lastCPUIdle
 					if diffTotal > 0 && diffTotal >= diffIdle {

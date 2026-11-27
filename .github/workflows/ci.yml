@@ -31,6 +31,9 @@ jobs:
       - name: Tidy dependencies
         run: go mod tidy
 
+      - name: Run unit tests
+        run: go test ./...
+
       - name: Build Binary
         env:
           GOOS: ${{ matrix.goos }}

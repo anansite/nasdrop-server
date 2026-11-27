@@ -2,8 +2,10 @@ package api
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -15,6 +17,8 @@ import (
 	"github.com/anansite/nasdrop-server/internal/db"
 	"github.com/anansite/nasdrop-server/internal/thumb"
 )
+
+const maxJSONBodyBytes = 4 << 20 // 4MB 请求体上限，防止低内存路由容器 OOM
 
 type Router struct {
 	store     *db.Store
@@ -114,6 +118,10 @@ func (rt *Router) handleFileHash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fullPath := filepath.Join(absData, cleanPath)
+	if !strings.HasPrefix(fullPath, absData+string(filepath.Separator)) {
+		http.Error(w, "Invalid path: outside data directory", http.StatusBadRequest)
+		return
+	}
 	info, err := os.Stat(fullPath)
 	if err != nil || info.IsDir() {
 		http.Error(w, "File not found", http.StatusNotFound)
@@ -156,6 +164,7 @@ func (rt *Router) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 
 	var metas []db.PhotoMetadata
 	// 支持单项或批量数组
@@ -224,8 +233,12 @@ func (rt *Router) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	sortBy := r.URL.Query().Get("sort")
 
 	if lStr := r.URL.Query().Get("limit"); lStr != "" {
-		if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 500 {
-			limit = l
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			if l > 500 {
+				limit = 500
+			} else {
+				limit = l
+			}
 		}
 	}
 	if oStr := r.URL.Query().Get("offset"); oStr != "" {
@@ -455,6 +468,7 @@ func (rt *Router) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 
 	var req struct {
 		Dir       string   `json:"dir"`
@@ -493,6 +507,7 @@ func (rt *Router) handleGroups(w http.ResponseWriter, r *http.Request) {
 			"groups": groups,
 		})
 	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 		var req db.PhotoGroup
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -520,6 +535,7 @@ func (rt *Router) handleGroupsUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	var req struct {
 		ID           string   `json:"id"`
 		Title        *string  `json:"title"`
@@ -533,6 +549,10 @@ func (rt *Router) handleGroupsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := rt.store.UpdateGroup(req.ID, req.Title, req.Memo, req.Items, req.ReplaceItems)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Group not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "Update group failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -548,6 +568,7 @@ func (rt *Router) handleGroupsAppend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	var req struct {
 		GroupID string   `json:"group_id"`
 		Items   []string `json:"items"`
@@ -558,6 +579,10 @@ func (rt *Router) handleGroupsAppend(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := rt.store.AppendGroupItems(req.GroupID, req.Items)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Group not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "Append items failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -573,6 +598,7 @@ func (rt *Router) handleGroupsRemoveItem(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	var req struct {
 		GroupID   string `json:"group_id"`
 		PhotoPath string `json:"photo_path"`
@@ -583,6 +609,10 @@ func (rt *Router) handleGroupsRemoveItem(w http.ResponseWriter, r *http.Request)
 	}
 	updated, err := rt.store.RemoveGroupItem(req.GroupID, req.PhotoPath)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "Group not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "Remove item failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -598,6 +628,7 @@ func (rt *Router) handleGroupsDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	var req struct {
 		ID string `json:"id"`
 	}

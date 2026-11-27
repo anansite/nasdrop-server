@@ -6,10 +6,13 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+var groupIDSeq atomic.Uint64
 
 type Store struct {
 	db *sql.DB
@@ -269,9 +272,14 @@ func (s *Store) Move(oldPath, newPath string) error {
 	defer tx.Rollback()
 
 	now := time.Now().UnixMilli()
+	// 处理 Overwrite: T 覆盖目标：若目标已存在于集锦或元数据表，先清理冲突项避免 UNIQUE 约束失败
+	if _, err := tx.Exec("DELETE FROM photo_group_items WHERE photo_path = ? AND group_id IN (SELECT group_id FROM photo_group_items WHERE photo_path = ?)", newClean, oldClean); err != nil {
+		log.Printf("[DB] Move dedup group_items %s->%s: %v", oldClean, newClean, err)
+	}
 	if _, err := tx.Exec("UPDATE photo_group_items SET photo_path = ? WHERE photo_path = ?", newClean, oldClean); err != nil {
 		log.Printf("[DB] Move group_items %s->%s: %v", oldClean, newClean, err)
 	}
+	_, _ = tx.Exec("DELETE FROM photo_metadata WHERE path = ?", newClean)
 	if _, err := tx.Exec(`UPDATE photo_metadata SET path = ?, name = ?, dir = ?, updated_at = ? WHERE path = ?`,
 		newClean, newName, newDir, now, oldClean); err != nil {
 		return err
@@ -338,6 +346,7 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 	defer stmt.Close()
 
 	for _, m := range moves {
+		_, _ = tx.Exec("DELETE FROM photo_metadata WHERE path = ?", m.newP)
 		if _, err := stmt.Exec(m.newP, m.newN, m.newD, now, m.oldP); err != nil {
 			log.Printf("[DB] MoveDir update error for %s: %v", m.oldP, err)
 		}
@@ -389,6 +398,7 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 		}
 		iRows.Close()
 		for _, m := range iMoves {
+			_, _ = tx.Exec(`DELETE FROM photo_group_items WHERE group_id = ? AND photo_path = ?`, m.gid, m.newP)
 			if _, err := tx.Exec(`UPDATE photo_group_items SET photo_path = ? WHERE group_id = ? AND photo_path = ?`, m.newP, m.gid, m.oldP); err != nil {
 				log.Printf("[DB] MoveDir update group_item %s/%s: %v", m.gid, m.oldP, err)
 			}
@@ -776,7 +786,7 @@ func (s *Store) CreateGroup(g *PhotoGroup) error {
 
 	now := time.Now().UnixMilli()
 	if g.ID == "" {
-		g.ID = fmt.Sprintf("grp_%d", now)
+		g.ID = fmt.Sprintf("grp_%d_%d", now, groupIDSeq.Add(1))
 	}
 	if g.CreatedAt == 0 {
 		g.CreatedAt = now
@@ -804,11 +814,13 @@ func (s *Store) CreateGroup(g *PhotoGroup) error {
 	defer stmt.Close()
 
 	cleanItems := make([]string, 0, len(g.Items))
+	seen := make(map[string]bool, len(g.Items))
 	for i, rawPath := range g.Items {
 		p := strings.Trim(rawPath, "/")
-		if p == "" {
+		if p == "" || seen[p] {
 			continue
 		}
+		seen[p] = true
 		cleanItems = append(cleanItems, p)
 		_, _ = stmt.Exec(g.ID, p, i, now)
 	}
