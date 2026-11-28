@@ -323,6 +323,9 @@ func (rt *Router) handleSyncDir(w http.ResponseWriter, r *http.Request) {
 		".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".bmp": true, ".heic": true, ".heif": true, ".avif": true, ".svg": true,
 		".mp4": true, ".mkv": true, ".mov": true, ".webm": true, ".avi": true, ".m4v": true, ".3gp": true,
 		".ts": true, ".flv": true, ".rmvb": true, ".wmv": true,
+		".mp3": true, ".m4a": true, ".wav": true, ".flac": true, ".aac": true, ".ogg": true, ".opus": true,
+		".wma": true, ".ape": true, ".amr": true, ".3ga": true, ".alac": true, ".aiff": true, ".aif": true,
+		".mka": true, ".ac3": true, ".caf": true, ".spx": true, ".mp2": true, ".mid": true, ".midi": true,
 	}
 
 	var live []db.PhotoMetadata

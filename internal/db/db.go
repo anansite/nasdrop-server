@@ -408,6 +408,17 @@ func (s *Store) MoveDir(oldPrefix, newPrefix string) error {
 	return tx.Commit()
 }
 
+const videoPathSQLCond = `lower(path) LIKE '%.mp4' OR lower(path) LIKE '%.mov' OR lower(path) LIKE '%.mkv' OR ` +
+	`lower(path) LIKE '%.avi' OR lower(path) LIKE '%.webm' OR lower(path) LIKE '%.m4v' OR lower(path) LIKE '%.3gp' OR ` +
+	`lower(path) LIKE '%.ts' OR lower(path) LIKE '%.flv' OR lower(path) LIKE '%.rmvb' OR lower(path) LIKE '%.wmv'`
+
+const audioPathSQLCond = `lower(path) LIKE '%.mp3' OR lower(path) LIKE '%.m4a' OR lower(path) LIKE '%.wav' OR ` +
+	`lower(path) LIKE '%.flac' OR lower(path) LIKE '%.aac' OR lower(path) LIKE '%.ogg' OR lower(path) LIKE '%.opus' OR ` +
+	`lower(path) LIKE '%.wma' OR lower(path) LIKE '%.ape' OR lower(path) LIKE '%.amr' OR lower(path) LIKE '%.3ga' OR ` +
+	`lower(path) LIKE '%.alac' OR lower(path) LIKE '%.aiff' OR lower(path) LIKE '%.aif' OR lower(path) LIKE '%.mka' OR ` +
+	`lower(path) LIKE '%.ac3' OR lower(path) LIKE '%.caf' OR lower(path) LIKE '%.spx' OR lower(path) LIKE '%.mp2' OR ` +
+	`lower(path) LIKE '%.mid' OR lower(path) LIKE '%.midi'`
+
 func (s *Store) GetTimeline(limit, offset int, dir string, sortBy string) ([]PhotoMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -425,6 +436,7 @@ func (s *Store) GetTimeline(limit, offset int, dir string, sortBy string) ([]Pho
 		rows, err = s.db.Query(`
 			SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 			FROM photo_metadata
+			WHERE NOT (`+audioPathSQLCond+`)
 			`+orderClause+`
 			LIMIT ? OFFSET ?
 		`, limit, offset)
@@ -472,12 +484,9 @@ func (s *Store) GetStats() (Stats, error) {
 	defer s.mu.RUnlock()
 
 	var st Stats
-	videoCond := `lower(path) LIKE '%.mp4' OR lower(path) LIKE '%.mov' OR lower(path) LIKE '%.mkv' OR ` +
-		`lower(path) LIKE '%.avi' OR lower(path) LIKE '%.webm' OR lower(path) LIKE '%.m4v' OR lower(path) LIKE '%.3gp' OR ` +
-		`lower(path) LIKE '%.ts' OR lower(path) LIKE '%.flv' OR lower(path) LIKE '%.rmvb' OR lower(path) LIKE '%.wmv'`
 	query := `SELECT
-		COALESCE(SUM(CASE WHEN ` + videoCond + ` THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN NOT (` + videoCond + `) THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN ` + videoPathSQLCond + ` THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN NOT (` + videoPathSQLCond + `) AND NOT (` + audioPathSQLCond + `) THEN 1 ELSE 0 END), 0),
 		COALESCE(COUNT(DISTINCT CASE WHEN dir <> '' THEN dir END), 0),
 		COALESCE(SUM(CASE WHEN voice_id <> '' OR memo <> '' THEN 1 ELSE 0 END), 0)
 		FROM photo_metadata`
@@ -495,7 +504,7 @@ func (s *Store) GetTimelineCount(dir string) (int, error) {
 	var total int
 	var err error
 	if cleanDir == "" {
-		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata`).Scan(&total)
+		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata WHERE NOT (` + audioPathSQLCond + `)`).Scan(&total)
 	} else {
 		escaped := escapeLike(cleanDir)
 		err = s.db.QueryRow(`SELECT COUNT(*) FROM photo_metadata WHERE dir = ? OR dir LIKE ? ESCAPE '\'`, cleanDir, escaped+"/%").Scan(&total)
@@ -605,6 +614,7 @@ func (s *Store) GetMemories(monthDay string, currentYear string, limit int) ([]P
 		SELECT path, name, dir, size, modified, taken_at, width, height, has_thumb, thumb_id, voice_id, voice_duration_ms, memo, lat, lng, location_name, updated_at
 		FROM photo_metadata
 		WHERE taken_at > 0
+		  AND NOT (` + audioPathSQLCond + `)
 		  AND strftime('%m-%d', datetime(taken_at / 1000, 'unixepoch', 'localtime')) = ?
 		  AND strftime('%Y', datetime(taken_at / 1000, 'unixepoch', 'localtime')) < ?
 		ORDER BY taken_at DESC
